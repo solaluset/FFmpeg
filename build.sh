@@ -32,7 +32,7 @@ check_cfg() {
 
   while [ $# != 0 ]; do
     local pattern="^$1\\s+([^\$]+)\$"
-    local value=$(echo "$output" | grep -E "$pattern" | sed -E "s/$pattern/\\1/")
+    local value=$(sed -E -n "s/$pattern/\\1/p" <<< "$output")
 
     if [ "$value" = "" -o "$value" = "no" ]; then
       return 1
