@@ -33,6 +33,6 @@ void ff_dct_unquantize_mpeg1_inter_mmi(MpegEncContext *s, int16_t *block,
         int n, int qscale);
 void ff_dct_unquantize_mpeg2_intra_mmi(MpegEncContext *s, int16_t *block,
         int n, int qscale);
-void ff_denoise_dct_mmi(MpegEncContext *s, int16_t *block);
+void ff_denoise_dct_mmi(int16_t block[64], int sum[64], const uint16_t offset[64]);
 
 #endif /* AVCODEC_MIPS_MPEGVIDEO_MIPS_H */

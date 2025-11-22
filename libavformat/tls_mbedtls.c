@@ -40,7 +40,6 @@
 #include "libavutil/avstring.h"
 
 typedef struct TLSContext {
-    const AVClass *class;
     TLSShared tls_shared;
     mbedtls_ssl_context ssl_context;
     mbedtls_ssl_config ssl_config;
@@ -175,26 +174,12 @@ static void handle_handshake_error(URLContext *h, int ret)
     }
 }
 
-static void parse_options(TLSContext *tls_ctxc, const char *uri)
-{
-    char buf[1024];
-    const char *p = strchr(uri, '?');
-    if (!p)
-        return;
-
-    if (!tls_ctxc->priv_key_pw && av_find_info_tag(buf, sizeof(buf), "key_password", p))
-        tls_ctxc->priv_key_pw = av_strdup(buf);
-}
-
 static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **options)
 {
     TLSContext *tls_ctx = h->priv_data;
     TLSShared *shr = &tls_ctx->tls_shared;
     uint32_t verify_res_flags;
     int ret;
-
-    // parse additional options
-    parse_options(tls_ctx, uri);
 
     if ((ret = ff_tls_open_underlying(shr, h, uri, options)) < 0)
         goto fail;
@@ -270,8 +255,8 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
     }
 
 #ifdef MBEDTLS_SSL_PROTO_TLS1_3
-    // mbedTLS does not allow disabling certificate verification with TLSv1.3 (yes, really).
-    if (!shr->verify) {
+    // this version does not allow disabling certificate verification with TLSv1.3 (yes, really).
+    if (mbedtls_version_get_number() == 0x03060000 && !shr->verify) {
         av_log(h, AV_LOG_INFO, "Forcing TLSv1.2 because certificate verification is disabled\n");
         mbedtls_ssl_conf_max_tls_version(&tls_ctx->ssl_config, MBEDTLS_SSL_VERSION_TLS1_2);
     }

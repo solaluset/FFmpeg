@@ -38,7 +38,6 @@
 #include "codec_internal.h"
 #include "dovi_rpu.h"
 #include "encode.h"
-#include "packet_internal.h"
 #include "avcodec.h"
 #include "profiles.h"
 
@@ -210,7 +209,7 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
 {
     SvtContext *svt_enc = avctx->priv_data;
     const AVPixFmtDescriptor *desc;
-    const AVDictionaryEntry av_unused *en = NULL;
+    av_unused const AVDictionaryEntry *en = NULL;
 
     // Update param from options
     if (svt_enc->enc_mode >= -1)
@@ -311,13 +310,7 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
         param->frame_rate_denominator = avctx->framerate.den;
     } else {
         param->frame_rate_numerator   = avctx->time_base.den;
-FF_DISABLE_DEPRECATION_WARNINGS
-        param->frame_rate_denominator = avctx->time_base.num
-#if FF_API_TICKS_PER_FRAME
-            * avctx->ticks_per_frame
-#endif
-            ;
-FF_ENABLE_DEPRECATION_WARNINGS
+        param->frame_rate_denominator = avctx->time_base.num;
     }
 
     /* 2 = IDR, closed GOP, 1 = CRA, open GOP */
@@ -435,7 +428,11 @@ static av_cold int eb_enc_init(AVCodecContext *avctx)
 
     svt_enc->eos_flag = EOS_NOT_REACHED;
 
+#if SVT_AV1_CHECK_VERSION(3, 0, 0)
+    svt_ret = svt_av1_enc_init_handle(&svt_enc->svt_handle, &svt_enc->enc_params);
+#else
     svt_ret = svt_av1_enc_init_handle(&svt_enc->svt_handle, svt_enc, &svt_enc->enc_params);
+#endif
     if (svt_ret != EB_ErrorNone) {
         return svt_print_error(avctx, svt_ret, "Error initializing encoder handle");
     }
@@ -541,7 +538,8 @@ static int eb_send_frame(AVCodecContext *avctx, const AVFrame *frame)
         const AVDOVIMetadata *metadata = (const AVDOVIMetadata *)sd->data;
         uint8_t *t35;
         int size;
-        if ((ret = ff_dovi_rpu_generate(&svt_enc->dovi, metadata, &t35, &size)) < 0)
+        if ((ret = ff_dovi_rpu_generate(&svt_enc->dovi, metadata, FF_DOVI_WRAP_T35,
+                                        &t35, &size)) < 0)
             return ret;
         ret = svt_add_metadata(headerPtr, EB_AV1_METADATA_TYPE_ITUT_T35, t35, size);
         av_free(t35);
@@ -592,7 +590,7 @@ static int eb_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
     AVFrame *frame = svt_enc->frame;
     EbErrorType svt_ret;
     AVBufferRef *ref;
-    int ret = 0, pict_type;
+    int ret = 0;
 
     if (svt_enc->eos_flag == EOS_RECEIVED)
         return AVERROR_EOF;
@@ -638,6 +636,7 @@ static int eb_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
     pkt->pts  = headerPtr->pts;
     pkt->dts  = headerPtr->dts;
 
+    enum AVPictureType pict_type;
     switch (headerPtr->pic_type) {
     case EB_AV1_KEY_PICTURE:
         pkt->flags |= AV_PKT_FLAG_KEY;
@@ -661,7 +660,7 @@ static int eb_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
         svt_enc->eos_flag = EOS_RECEIVED;
 #endif
 
-    ff_side_data_set_encoder_stats(pkt, headerPtr->qp * FF_QP2LAMBDA, NULL, 0, pict_type);
+    ff_encode_add_stats_side_data(pkt, headerPtr->qp * FF_QP2LAMBDA, NULL, 0, pict_type);
 
     svt_av1_enc_release_out_buffer(&headerPtr);
 
@@ -765,9 +764,8 @@ const FFCodec ff_libsvtav1_encoder = {
     .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_OTHER_THREADS,
     .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE |
                       FF_CODEC_CAP_AUTO_THREADS | FF_CODEC_CAP_INIT_CLEANUP,
-    .p.pix_fmts     = (const enum AVPixelFormat[]){ AV_PIX_FMT_YUV420P,
-                                                    AV_PIX_FMT_YUV420P10,
-                                                    AV_PIX_FMT_NONE },
+    CODEC_PIXFMTS(AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10),
+    .color_ranges   = AVCOL_RANGE_MPEG | AVCOL_RANGE_JPEG,
     .p.priv_class   = &class,
     .defaults       = eb_enc_defaults,
     .p.wrapper_name = "libsvtav1",

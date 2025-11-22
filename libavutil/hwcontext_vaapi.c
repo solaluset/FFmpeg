@@ -72,6 +72,7 @@ typedef struct VAAPIDevicePriv {
 typedef struct VAAPISurfaceFormat {
     enum AVPixelFormat pix_fmt;
     VAImageFormat image_format;
+    unsigned int fourcc;
 } VAAPISurfaceFormat;
 
 typedef struct VAAPIDeviceContext {
@@ -218,15 +219,21 @@ static int vaapi_get_image_format(AVHWDeviceContext *hwdev,
                                   VAImageFormat **image_format)
 {
     VAAPIDeviceContext *ctx = hwdev->hwctx;
+    const VAAPIFormatDescriptor *desc;
     int i;
 
+    desc = vaapi_format_from_pix_fmt(pix_fmt);
+    if (!desc || !image_format)
+        goto fail;
+
     for (i = 0; i < ctx->nb_formats; i++) {
-        if (ctx->formats[i].pix_fmt == pix_fmt) {
-            if (image_format)
-                *image_format = &ctx->formats[i].image_format;
+        if (ctx->formats[i].fourcc == desc->fourcc) {
+            *image_format = &ctx->formats[i].image_format;
             return 0;
         }
     }
+
+fail:
     return AVERROR(ENOSYS);
 }
 
@@ -435,6 +442,7 @@ static int vaapi_device_init(AVHWDeviceContext *hwdev)
             av_log(hwdev, AV_LOG_DEBUG, "Format %#x -> %s.\n",
                    fourcc, av_get_pix_fmt_name(pix_fmt));
             ctx->formats[ctx->nb_formats].pix_fmt      = pix_fmt;
+            ctx->formats[ctx->nb_formats].fourcc       = fourcc;
             ctx->formats[ctx->nb_formats].image_format = image_list[i];
             ++ctx->nb_formats;
         }
@@ -1011,12 +1019,6 @@ static int vaapi_map_to_memory(AVHWFramesContext *hwfc, AVFrame *dst,
 {
     int err;
 
-    if (dst->format != AV_PIX_FMT_NONE) {
-        err = vaapi_get_image_format(hwfc->device_ctx, dst->format, NULL);
-        if (err < 0)
-            return err;
-    }
-
     err = vaapi_map_frame(hwfc, dst, src, flags);
     if (err)
         return err;
@@ -1225,7 +1227,7 @@ static int vaapi_map_from_drm(AVHWFramesContext *src_fc, AVFrame *dst,
 
     if (!use_prime2 || vas != VA_STATUS_SUCCESS) {
         int k;
-        unsigned long buffer_handle;
+        uintptr_t buffer_handle;
         VASurfaceAttribExternalBuffers buffer_desc;
         VASurfaceAttrib buffer_attrs[2] = {
             {
@@ -1748,7 +1750,9 @@ static int vaapi_device_create(AVHWDeviceContext *ctx, const char *device,
 #if CONFIG_LIBDRM
             drmVersion *info;
             const AVDictionaryEntry *kernel_driver;
+            const AVDictionaryEntry *vendor_id;
             kernel_driver = av_dict_get(opts, "kernel_driver", NULL, 0);
+            vendor_id = av_dict_get(opts, "vendor_id", NULL, 0);
 #endif
             for (n = 0; n < max_devices; n++) {
                 snprintf(path, sizeof(path),
@@ -1803,6 +1807,36 @@ static int vaapi_device_create(AVHWDeviceContext *ctx, const char *device,
                     close(priv->drm_fd);
                     priv->drm_fd = -1;
                     continue;
+                } else if (vendor_id) {
+                    drmDevicePtr device;
+                    char drm_vendor[8];
+                    if (drmGetDevice(priv->drm_fd, &device)) {
+                        av_log(ctx, AV_LOG_VERBOSE,
+                               "Failed to get DRM device info for device %d.\n", n);
+                        close(priv->drm_fd);
+                        priv->drm_fd = -1;
+                        drmFreeVersion(info);
+                        continue;
+                    }
+
+                    snprintf(drm_vendor, sizeof(drm_vendor), "0x%x", device->deviceinfo.pci->vendor_id);
+                    if (strcmp(vendor_id->value, drm_vendor)) {
+                        av_log(ctx, AV_LOG_VERBOSE, "Ignoring device %d "
+                               "with non-matching vendor id (%s).\n",
+                               n, vendor_id->value);
+                        drmFreeDevice(&device);
+                        close(priv->drm_fd);
+                        priv->drm_fd = -1;
+                        drmFreeVersion(info);
+                        continue;
+                    }
+                    av_log(ctx, AV_LOG_VERBOSE, "Trying to use "
+                           "DRM render node for device %d, "
+                           "with matching vendor id (%s).\n",
+                           n, vendor_id->value);
+                    drmFreeDevice(&device);
+                    drmFreeVersion(info);
+                    break;
                 }
                 drmFreeVersion(info);
 #endif

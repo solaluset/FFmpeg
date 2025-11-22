@@ -25,6 +25,7 @@
 
 #include <float.h>
 
+#include "libavutil/avassert.h"
 #include "libavutil/cpu.h"
 #include "libavutil/mem.h"
 #include "libavutil/tx.h"
@@ -40,7 +41,6 @@
 #include "avfilter.h"
 #include "filters.h"
 #include "formats.h"
-#include "internal.h"
 #include "af_afirdsp.h"
 
 #define MAX_IR_STREAMS 32
@@ -230,6 +230,8 @@ static int init_segment(AVFilterContext *ctx, AudioFIRSegment *seg, int selir,
         iscale.d = 1.0 / sqrt(2.0 * part_size);
         tx_type  = AV_TX_DOUBLE_RDFT;
         break;
+    default:
+        av_assert1(0);
     }
 
     for (int ch = 0; ch < ctx->inputs[0]->ch_layout.nb_channels && part_size >= 1; ch++) {
@@ -537,9 +539,11 @@ static int activate(AVFilterContext *ctx)
     return FFERROR_NOT_READY;
 }
 
-static int query_formats(AVFilterContext *ctx)
+static int query_formats(const AVFilterContext *ctx,
+                         AVFilterFormatsConfig **cfg_in,
+                         AVFilterFormatsConfig **cfg_out)
 {
-    AudioFIRContext *s = ctx->priv;
+    const AudioFIRContext *s = ctx->priv;
     static const enum AVSampleFormat sample_fmts[3][3] = {
         { AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_DBLP, AV_SAMPLE_FMT_NONE },
         { AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_NONE },
@@ -547,32 +551,29 @@ static int query_formats(AVFilterContext *ctx)
     };
     int ret;
 
-    if (s->ir_format) {
-        ret = ff_set_common_all_channel_counts(ctx);
-        if (ret < 0)
-            return ret;
-    } else {
+    if (!s->ir_format) {
         AVFilterChannelLayouts *mono = NULL;
         AVFilterChannelLayouts *layouts = ff_all_channel_counts();
 
-        if ((ret = ff_channel_layouts_ref(layouts, &ctx->inputs[0]->outcfg.channel_layouts)) < 0)
+        if ((ret = ff_channel_layouts_ref(layouts, &cfg_in[0]->channel_layouts)) < 0)
             return ret;
-        if ((ret = ff_channel_layouts_ref(layouts, &ctx->outputs[0]->incfg.channel_layouts)) < 0)
+        if ((ret = ff_channel_layouts_ref(layouts, &cfg_out[0]->channel_layouts)) < 0)
             return ret;
 
         ret = ff_add_channel_layout(&mono, &(AVChannelLayout)AV_CHANNEL_LAYOUT_MONO);
         if (ret)
             return ret;
         for (int i = 1; i < ctx->nb_inputs; i++) {
-            if ((ret = ff_channel_layouts_ref(mono, &ctx->inputs[i]->outcfg.channel_layouts)) < 0)
+            if ((ret = ff_channel_layouts_ref(mono, &cfg_in[i]->channel_layouts)) < 0)
                 return ret;
         }
     }
 
-    if ((ret = ff_set_common_formats_from_list(ctx, sample_fmts[s->precision])) < 0)
+    if ((ret = ff_set_common_formats_from_list2(ctx, cfg_in, cfg_out,
+                                                sample_fmts[s->precision])) < 0)
         return ret;
 
-    return ff_set_common_all_samplerates(ctx);
+    return 0;
 }
 
 static int config_output(AVFilterLink *outlink)
@@ -776,18 +777,18 @@ static const AVFilterPad outputs[] = {
     },
 };
 
-const AVFilter ff_af_afir = {
-    .name          = "afir",
-    .description   = NULL_IF_CONFIG_SMALL("Apply Finite Impulse Response filter with supplied coefficients in additional stream(s)."),
+const FFFilter ff_af_afir = {
+    .p.name        = "afir",
+    .p.description = NULL_IF_CONFIG_SMALL("Apply Finite Impulse Response filter with supplied coefficients in additional stream(s)."),
+    .p.priv_class  = &afir_class,
+    .p.flags       = AVFILTER_FLAG_DYNAMIC_INPUTS  |
+                     AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL |
+                     AVFILTER_FLAG_SLICE_THREADS,
     .priv_size     = sizeof(AudioFIRContext),
-    .priv_class    = &afir_class,
-    FILTER_QUERY_FUNC(query_formats),
+    FILTER_QUERY_FUNC2(query_formats),
     FILTER_OUTPUTS(outputs),
     .init          = init,
     .activate      = activate,
     .uninit        = uninit,
     .process_command = process_command,
-    .flags         = AVFILTER_FLAG_DYNAMIC_INPUTS  |
-                     AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL |
-                     AVFILTER_FLAG_SLICE_THREADS,
 };

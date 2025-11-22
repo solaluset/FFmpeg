@@ -25,8 +25,8 @@
 #include "libavutil/opt.h"
 #include "libavutil/pixfmt.h"
 #include "avfilter.h"
+#include "filters.h"
 #include "framesync.h"
-#include "internal.h"
 #include "vf_blend_init.h"
 #include "video.h"
 #include "blend.h"
@@ -173,10 +173,11 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
     const uint8_t *top    = td->top->data[td->plane];
     const uint8_t *bottom = td->bottom->data[td->plane];
     uint8_t *dst    = td->dst->data[td->plane];
+    FilterLink *inl = ff_filter_link(td->inlink);
     double values[VAR_VARS_NB];
     SliceParams sliceparam = {.values = &values[0], .starty = slice_start, .e = td->param->e ? td->param->e[jobnr] : NULL};
 
-    values[VAR_N]  = td->inlink->frame_count_out;
+    values[VAR_N]  = inl->frame_count_out;
     values[VAR_T]  = td->dst->pts == AV_NOPTS_VALUE ? NAN : td->dst->pts * av_q2d(td->inlink->time_base);
     values[VAR_W]  = td->w;
     values[VAR_H]  = td->h;
@@ -339,8 +340,10 @@ static int config_params(AVFilterContext *ctx)
 
 static int config_output(AVFilterLink *outlink)
 {
+    FilterLink *outl = ff_filter_link(outlink);
     AVFilterContext *ctx = outlink->src;
     AVFilterLink *toplink = ctx->inputs[TOP];
+    FilterLink *tl = ff_filter_link(toplink);
     BlendContext *s = ctx->priv;
     const AVPixFmtDescriptor *pix_desc = av_pix_fmt_desc_get(toplink->format);
     int ret;
@@ -362,7 +365,7 @@ static int config_output(AVFilterLink *outlink)
     outlink->h = toplink->h;
     outlink->time_base = toplink->time_base;
     outlink->sample_aspect_ratio = toplink->sample_aspect_ratio;
-    outlink->frame_rate = toplink->frame_rate;
+    outl->frame_rate = tl->frame_rate;
 
     s->hsub = pix_desc->log2_chroma_w;
     s->vsub = pix_desc->log2_chroma_h;
@@ -425,9 +428,11 @@ static const AVFilterPad blend_inputs[] = {
     },
 };
 
-const AVFilter ff_vf_blend = {
-    .name          = "blend",
-    .description   = NULL_IF_CONFIG_SMALL("Blend two video frames into each other."),
+const FFFilter ff_vf_blend = {
+    .p.name        = "blend",
+    .p.description = NULL_IF_CONFIG_SMALL("Blend two video frames into each other."),
+    .p.priv_class  = &blend_class,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL | AVFILTER_FLAG_SLICE_THREADS,
     .preinit       = blend_framesync_preinit,
     .init          = init,
     .uninit        = uninit,
@@ -436,8 +441,6 @@ const AVFilter ff_vf_blend = {
     FILTER_INPUTS(blend_inputs),
     FILTER_OUTPUTS(blend_outputs),
     FILTER_PIXFMTS_ARRAY(pix_fmts),
-    .priv_class    = &blend_class,
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL | AVFILTER_FLAG_SLICE_THREADS,
     .process_command = process_command,
 };
 
@@ -476,17 +479,17 @@ static const AVFilterPad tblend_inputs[] = {
     },
 };
 
-const AVFilter ff_vf_tblend = {
-    .name          = "tblend",
-    .description   = NULL_IF_CONFIG_SMALL("Blend successive frames."),
+const FFFilter ff_vf_tblend = {
+    .p.name        = "tblend",
+    .p.description = NULL_IF_CONFIG_SMALL("Blend successive frames."),
+    .p.priv_class  = &tblend_class,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL | AVFILTER_FLAG_SLICE_THREADS,
     .priv_size     = sizeof(BlendContext),
-    .priv_class    = &tblend_class,
     .init          = init,
     .uninit        = uninit,
     FILTER_INPUTS(tblend_inputs),
     FILTER_OUTPUTS(blend_outputs),
     FILTER_PIXFMTS_ARRAY(pix_fmts),
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL | AVFILTER_FLAG_SLICE_THREADS,
     .process_command = process_command,
 };
 

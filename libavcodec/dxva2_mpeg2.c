@@ -160,7 +160,7 @@ static int commit_bitstream_and_slice_buffer(AVCodecContext *avctx,
         s->cur_pic.ptr->hwaccel_picture_private;
     const int is_field = s->picture_structure != PICT_FRAME;
     const unsigned mb_count = s->mb_width * (s->mb_height >> is_field);
-    void     *dxva_data_ptr;
+    void     *dxva_data_ptr = NULL;
     uint8_t  *dxva_data, *current, *end;
     unsigned dxva_size;
     unsigned i;
@@ -185,6 +185,9 @@ static int commit_bitstream_and_slice_buffer(AVCodecContext *avctx,
             return -1;
     }
 #endif
+
+    if (!dxva_data_ptr)
+        return -1;
 
     dxva_data = dxva_data_ptr;
     current = dxva_data;
@@ -254,6 +257,7 @@ static int commit_bitstream_and_slice_buffer(AVCodecContext *avctx,
 }
 
 static int dxva2_mpeg2_start_frame(AVCodecContext *avctx,
+                                   av_unused const AVBufferRef *buffer_ref,
                                    av_unused const uint8_t *buffer,
                                    av_unused uint32_t size)
 {

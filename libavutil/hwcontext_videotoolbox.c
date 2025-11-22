@@ -53,6 +53,7 @@ static const struct {
 #ifdef kCFCoreFoundationVersionNumber10_7
     { kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,  false, AV_PIX_FMT_NV12 },
     { kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,   true,  AV_PIX_FMT_NV12 },
+    { kCVPixelFormatType_4444AYpCbCr8,                  false, AV_PIX_FMT_AYUV },
     { kCVPixelFormatType_4444AYpCbCr16,                 false, AV_PIX_FMT_AYUV64 },
 #endif
 #if HAVE_KCVPIXELFORMATTYPE_420YPCBCR10BIPLANARVIDEORANGE
@@ -86,6 +87,7 @@ static const struct {
 static const enum AVPixelFormat supported_formats[] = {
 #ifdef kCFCoreFoundationVersionNumber10_7
     AV_PIX_FMT_NV12,
+    AV_PIX_FMT_AYUV,
     AV_PIX_FMT_AYUV64,
 #endif
     AV_PIX_FMT_YUV420P,
@@ -532,6 +534,35 @@ CFStringRef av_map_videotoolbox_color_trc_from_av(enum AVColorTransferCharacteri
     }
 }
 
+/**
+ * Copy all attachments for the specified mode from the given buffer.
+ */
+static CFDictionaryRef vt_cv_buffer_copy_attachments(CVBufferRef buffer,
+                                                     CVAttachmentMode attachment_mode)
+{
+    // Check that our SDK is at least macOS 12 / iOS 15 / tvOS 15
+    #if (TARGET_OS_OSX  && defined(__MAC_12_0)    && __MAC_OS_X_VERSION_MAX_ALLOWED  >= __MAC_12_0)     || \
+        (TARGET_OS_IOS  && defined(__IPHONE_15_0) && __IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_15_0)  || \
+        (TARGET_OS_TV   && defined(__TVOS_15_0)   && __TV_OS_VERSION_MAX_ALLOWED     >= __TVOS_15_0)
+        // On recent enough versions, just use the respective API
+        if (__builtin_available(macOS 12.0, iOS 15.0, tvOS 15.0, *))
+            return CVBufferCopyAttachments(buffer, attachment_mode);
+    #endif
+
+    // Check that the target is lower than macOS 12 / iOS 15 / tvOS 15
+    // else this would generate a deprecation warning and anyway never run because
+    // the runtime availability check above would be always true.
+    #if (TARGET_OS_OSX  && (!defined(__MAC_12_0)    || __MAC_OS_X_VERSION_MIN_REQUIRED  < __MAC_12_0))     || \
+        (TARGET_OS_IOS  && (!defined(__IPHONE_15_0) || __IPHONE_OS_VERSION_MIN_REQUIRED < __IPHONE_15_0))  || \
+        (TARGET_OS_TV   && (!defined(__TVOS_15_0)   || __TV_OS_VERSION_MIN_REQUIRED     < __TVOS_15_0))
+        // Fallback on SDKs or runtime versions < macOS 12 / iOS 15 / tvOS 15
+        CFDictionaryRef dict = CVBufferGetAttachments(buffer, attachment_mode);
+        return (dict) ? CFDictionaryCreateCopy(NULL, dict) : NULL;
+    #else
+        return NULL; // Impossible, just make the compiler happy
+    #endif
+}
+
 static int vt_pixbuf_set_colorspace(void *log_ctx,
                                     CVPixelBufferRef pixbuf, const AVFrame *src)
 {
@@ -545,7 +576,7 @@ static int vt_pixbuf_set_colorspace(void *log_ctx,
             colormatrix, kCVAttachmentMode_ShouldPropagate);
     else {
         CVBufferRemoveAttachment(pixbuf, kCVImageBufferYCbCrMatrixKey);
-        if (src->colorspace != AVCOL_SPC_UNSPECIFIED)
+        if (src->colorspace != AVCOL_SPC_UNSPECIFIED && src->colorspace != AVCOL_SPC_RGB)
             av_log(log_ctx, AV_LOG_WARNING,
                 "Color space %s is not supported.\n",
                 av_color_space_name(src->colorspace));
@@ -557,7 +588,7 @@ static int vt_pixbuf_set_colorspace(void *log_ctx,
             colorpri, kCVAttachmentMode_ShouldPropagate);
     else {
         CVBufferRemoveAttachment(pixbuf, kCVImageBufferColorPrimariesKey);
-        if (src->color_primaries != AVCOL_SPC_UNSPECIFIED)
+        if (src->color_primaries != AVCOL_PRI_UNSPECIFIED)
             av_log(log_ctx, AV_LOG_WARNING,
                 "Color primaries %s is not supported.\n",
                 av_color_primaries_name(src->color_primaries));
@@ -566,7 +597,7 @@ static int vt_pixbuf_set_colorspace(void *log_ctx,
     colortrc = av_map_videotoolbox_color_trc_from_av(src->color_trc);
     if (colortrc)
         CVBufferSetAttachment(pixbuf, kCVImageBufferTransferFunctionKey,
-            colorpri, kCVAttachmentMode_ShouldPropagate);
+            colortrc, kCVAttachmentMode_ShouldPropagate);
     else {
         CVBufferRemoveAttachment(pixbuf, kCVImageBufferTransferFunctionKey);
         if (src->color_trc != AVCOL_TRC_UNSPECIFIED)
@@ -588,14 +619,23 @@ static int vt_pixbuf_set_colorspace(void *log_ctx,
     } else
         CVBufferRemoveAttachment(pixbuf, kCVImageBufferGammaLevelKey);
 
+#if (TARGET_OS_OSX && __MAC_OS_X_VERSION_MAX_ALLOWED >= 100800) || \
+    (TARGET_OS_IOS && __IPHONE_OS_VERSION_MAX_ALLOWED >= 100000)
     if (__builtin_available(macOS 10.8, iOS 10, *)) {
-        CFDictionaryRef attachments = CVBufferCopyAttachments(pixbuf, kCVAttachmentMode_ShouldPropagate);
+        CFDictionaryRef attachments =
+            vt_cv_buffer_copy_attachments(pixbuf, kCVAttachmentMode_ShouldPropagate);
+
         if (attachments) {
-            colorspace = CVImageBufferCreateColorSpaceFromAttachments(attachments);
+            colorspace =
+                CVImageBufferCreateColorSpaceFromAttachments(attachments);
             CFRelease(attachments);
         }
     }
+#endif
 
+    // Done outside the above preprocessor code and if's so that
+    // in any case a wrong kCVImageBufferCGColorSpaceKey is removed
+    // if the above code is not used or fails.
     if (colorspace) {
         CVBufferSetAttachment(pixbuf, kCVImageBufferCGColorSpaceKey,
             colorspace, kCVAttachmentMode_ShouldPropagate);

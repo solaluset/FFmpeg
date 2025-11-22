@@ -272,6 +272,7 @@ int ff_dxva2_av1_fill_picture_parameters(const AVCodecContext *avctx, AVDXVACont
 }
 
 static int dxva2_av1_start_frame(AVCodecContext *avctx,
+                                 av_unused const AVBufferRef *buffer_ref,
                                  av_unused const uint8_t *buffer,
                                  av_unused uint32_t size)
 {
@@ -354,7 +355,7 @@ static int commit_bitstream_and_slice_buffer(AVCodecContext *avctx,
     const AV1DecContext *h = avctx->priv_data;
     AVDXVAContext *ctx = DXVA_CONTEXT(avctx);
     struct av1_dxva2_picture_context *ctx_pic = h->cur_frame.hwaccel_picture_private;
-    void     *dxva_data_ptr;
+    void     *dxva_data_ptr = NULL;
     uint8_t  *dxva_data;
     unsigned dxva_size;
     unsigned padding;
@@ -382,7 +383,7 @@ static int commit_bitstream_and_slice_buffer(AVCodecContext *avctx,
 
     dxva_data = dxva_data_ptr;
 
-    if (ctx_pic->bitstream_size > dxva_size) {
+    if (!dxva_data || ctx_pic->bitstream_size > dxva_size) {
         av_log(avctx, AV_LOG_ERROR, "Bitstream size exceeds hardware buffer");
         return -1;
     }
@@ -450,7 +451,7 @@ static int dxva2_av1_end_frame(AVCodecContext *avctx)
     return ret;
 }
 
-static int dxva2_av1_uninit(AVCodecContext *avctx)
+static av_cold int dxva2_av1_uninit(AVCodecContext *avctx)
 {
     struct AV1DXVAContext *ctx = avctx->internal->hwaccel_priv_data;
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Institue of Software Chinese Academy of Sciences (ISCAS).
+ * Copyright (c) 2024 Institute of Software Chinese Academy of Sciences (ISCAS).
  *
  * This file is part of FFmpeg.
  *
@@ -22,6 +22,7 @@
 
 #if __riscv_xlen >= 64
 func ff_put_pixels8x8_rvi
+        lpad    0
 .rept 8
         ld t0, (a1)
         sd t0, (a0)
@@ -33,6 +34,7 @@ func ff_put_pixels8x8_rvi
 endfunc
 
 func ff_put_pixels16x16_rvi
+        lpad    0
 .rept 16
         ld t0, (a1)
         ld t1, 8(a1)

@@ -146,24 +146,24 @@ static const struct {
     { AV_PIX_FMT_Y210,
                        MFX_FOURCC_Y210, 1 },
     // VUYX is used for VAAPI child device,
-    // the SDK only delares support for AYUV
+    // the SDK only declares support for AYUV
     { AV_PIX_FMT_VUYX,
                        MFX_FOURCC_AYUV, 0 },
     // XV30 is used for VAAPI child device,
-    // the SDK only delares support for Y410
+    // the SDK only declares support for Y410
     { AV_PIX_FMT_XV30,
                        MFX_FOURCC_Y410, 0 },
 #if QSV_VERSION_ATLEAST(1, 31)
     // P012 is used for VAAPI child device,
-    // the SDK only delares support for P016
+    // the SDK only declares support for P016
     { AV_PIX_FMT_P012,
                        MFX_FOURCC_P016, 1 },
     // Y212 is used for VAAPI child device,
-    // the SDK only delares support for Y216
+    // the SDK only declares support for Y216
     { AV_PIX_FMT_Y212,
                        MFX_FOURCC_Y216, 1 },
     // XV36 is used for VAAPI child device,
-    // the SDK only delares support for Y416
+    // the SDK only declares support for Y416
     { AV_PIX_FMT_XV36,
                        MFX_FOURCC_Y416, 1 },
 #endif
@@ -845,18 +845,18 @@ static int qsv_d3d11_update_config(void *ctx, mfxHDL handle, mfxConfig cfg)
     if (SUCCEEDED(hr)) {
         hr = IDXGIDevice_GetAdapter(pDXGIDevice, &pDXGIAdapter);
         if (FAILED(hr)) {
-            av_log(ctx, AV_LOG_ERROR, "Error IDXGIDevice_GetAdapter %d\n", hr);
+            av_log(ctx, AV_LOG_ERROR, "Error IDXGIDevice_GetAdapter %#lx\n", hr);
             IDXGIDevice_Release(pDXGIDevice);
             return ret;
         }
 
         hr = IDXGIAdapter_GetDesc(pDXGIAdapter, &adapterDesc);
         if (FAILED(hr)) {
-            av_log(ctx, AV_LOG_ERROR, "Error IDXGIAdapter_GetDesc %d\n", hr);
+            av_log(ctx, AV_LOG_ERROR, "Error IDXGIAdapter_GetDesc %#lx\n", hr);
             goto fail;
         }
     } else {
-        av_log(ctx, AV_LOG_ERROR, "Error ID3D11Device_QueryInterface %d\n", hr);
+        av_log(ctx, AV_LOG_ERROR, "Error ID3D11Device_QueryInterface %#lx\n", hr);
         return ret;
     }
 
@@ -917,47 +917,47 @@ static int qsv_d3d9_update_config(void *ctx, mfxHDL handle, mfxConfig cfg)
 
     hr = IDirect3DDeviceManager9_OpenDeviceHandle(devmgr, &device_handle);
     if (FAILED(hr)) {
-        av_log(ctx, AV_LOG_ERROR, "Error OpenDeviceHandle %d\n", hr);
+        av_log(ctx, AV_LOG_ERROR, "Error OpenDeviceHandle %#lx\n", hr);
         goto fail;
     }
 
     hr = IDirect3DDeviceManager9_LockDevice(devmgr, device_handle, &device, TRUE);
     if (FAILED(hr)) {
-        av_log(ctx, AV_LOG_ERROR, "Error LockDevice %d\n", hr);
+        av_log(ctx, AV_LOG_ERROR, "Error LockDevice %#lx\n", hr);
         IDirect3DDeviceManager9_CloseDeviceHandle(devmgr, device_handle);
         goto fail;
     }
     hr = IDirect3DDevice9_QueryInterface(device, &IID_IDirect3DDevice9Ex, (void **)&device_ex);
     IDirect3DDevice9_Release(device);
     if (FAILED(hr)) {
-        av_log(ctx, AV_LOG_ERROR, "Error IDirect3DDevice9_QueryInterface %d\n", hr);
+        av_log(ctx, AV_LOG_ERROR, "Error IDirect3DDevice9_QueryInterface %#lx\n", hr);
         goto unlock;
     }
 
     hr = IDirect3DDevice9Ex_GetCreationParameters(device_ex, &params);
     if (FAILED(hr)) {
-        av_log(ctx, AV_LOG_ERROR, "Error IDirect3DDevice9_GetCreationParameters %d\n", hr);
+        av_log(ctx, AV_LOG_ERROR, "Error IDirect3DDevice9_GetCreationParameters %#lx\n", hr);
         IDirect3DDevice9Ex_Release(device_ex);
         goto unlock;
     }
 
     hr = IDirect3DDevice9Ex_GetDirect3D(device_ex, &d3d9);
     if (FAILED(hr)) {
-        av_log(ctx, AV_LOG_ERROR, "Error IDirect3DDevice9Ex_GetDirect3D %d\n", hr);
+        av_log(ctx, AV_LOG_ERROR, "Error IDirect3DDevice9Ex_GetDirect3D %#lx\n", hr);
         IDirect3DDevice9Ex_Release(device_ex);
         goto unlock;
     }
     hr = IDirect3D9_QueryInterface(d3d9, &IID_IDirect3D9Ex, (void **)&d3d9ex);
     IDirect3D9_Release(d3d9);
     if (FAILED(hr)) {
-        av_log(ctx, AV_LOG_ERROR, "Error IDirect3D9_QueryInterface3D %d\n", hr);
+        av_log(ctx, AV_LOG_ERROR, "Error IDirect3D9_QueryInterface3D %#lx\n", hr);
         IDirect3DDevice9Ex_Release(device_ex);
         goto unlock;
     }
 
     hr = IDirect3D9Ex_GetAdapterLUID(d3d9ex, params.AdapterOrdinal, &luid);
     if (FAILED(hr)) {
-        av_log(ctx, AV_LOG_ERROR, "Error IDirect3DDevice9Ex_GetAdapterLUID %d\n", hr);
+        av_log(ctx, AV_LOG_ERROR, "Error IDirect3DDevice9Ex_GetAdapterLUID %#lx\n", hr);
         goto release;
     }
 
@@ -1549,8 +1549,11 @@ static int qsv_frames_derive_from(AVHWFramesContext *dst_ctx,
                 dst_hwctx->texture_infos[i].texture = (ID3D11Texture2D*)pair->first;
                 dst_hwctx->texture_infos[i].index = pair->second == (mfxMemId)MFX_INFINITE ? (intptr_t)0 : (intptr_t)pair->second;
             }
-            ID3D11Texture2D_GetDesc(dst_hwctx->texture_infos[0].texture, &texDesc);
-            dst_hwctx->BindFlags = texDesc.BindFlags;
+            if (src_hwctx->nb_surfaces) {
+                ID3D11Texture2D_GetDesc(dst_hwctx->texture_infos[0].texture, &texDesc);
+                dst_hwctx->BindFlags = texDesc.BindFlags;
+            } else
+                dst_hwctx->BindFlags = qsv_get_d3d11va_bind_flags(src_hwctx->frame_type);
         }
         break;
 #endif
@@ -1834,7 +1837,7 @@ static int qsv_transfer_data_from(AVHWFramesContext *ctx, AVFrame *dst,
 
     /* According to MSDK spec for mfxframeinfo, "Width must be a multiple of 16.
      * Height must be a multiple of 16 for progressive frame sequence and a
-     * multiple of 32 otherwise.", so allign all frames to 16 before downloading. */
+     * multiple of 32 otherwise.", so align all frames to 16 before downloading. */
     if (dst->height & 15 || dst->linesize[0] & 15) {
         realigned = 1;
         if (tmp_frame->format != dst->format ||
@@ -1918,7 +1921,7 @@ static int qsv_transfer_data_to(AVHWFramesContext *ctx, AVFrame *dst,
 
     /* According to MSDK spec for mfxframeinfo, "Width must be a multiple of 16.
      * Height must be a multiple of 16 for progressive frame sequence and a
-     * multiple of 32 otherwise.", so allign all frames to 16 before uploading. */
+     * multiple of 32 otherwise.", so align all frames to 16 before uploading. */
     if (src->height & 15 || src->linesize[0] & 15) {
         realigned = 1;
         if (tmp_frame->format != src->format ||
@@ -2569,8 +2572,8 @@ static int qsv_device_create(AVHWDeviceContext *ctx, const char *device,
             // used on recent Intel hardware.  Set options to the VAAPI device
             // creation so that we should pick a usable setup by default if
             // possible, even when multiple devices and drivers are available.
-            av_dict_set(&child_device_opts, "kernel_driver", "i915", 0);
-            av_dict_set(&child_device_opts, "driver",        "iHD",  0);
+            av_dict_set(&child_device_opts, "vendor_id", "0x8086", 0);
+            av_dict_set(&child_device_opts, "driver",    "iHD",    0);
         }
         break;
 #endif

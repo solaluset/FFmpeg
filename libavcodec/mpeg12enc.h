@@ -24,12 +24,24 @@
 
 #include <stdint.h>
 
-#include "mpegvideo.h"
+#include "mpegvideoenc.h"
+#include "mpegvideodata.h"
 
-void ff_mpeg1_encode_picture_header(MpegEncContext *s);
-void ff_mpeg1_encode_mb(MpegEncContext *s, int16_t block[8][64],
-                        int motion_x, int motion_y);
-void ff_mpeg1_encode_init(MpegEncContext *s);
-void ff_mpeg1_encode_slice_header(MpegEncContext *s);
+void ff_mpeg1_encode_slice_header(MPVEncContext *s);
+
+// Must not be called before intra_dc_precision has been sanitized in ff_mpv_encode_init()
+static inline void ff_mpeg1_encode_init(MPVEncContext *s)
+{
+    s->c.y_dc_scale_table =
+    s->c.c_dc_scale_table = ff_mpeg12_dc_scale_table[s->c.intra_dc_precision];
+}
+
+static inline void ff_mpeg1_clean_buffers(MPVEncContext *s)
+{
+    s->last_dc[0] = 128 << s->c.intra_dc_precision;
+    s->last_dc[1] = s->last_dc[0];
+    s->last_dc[2] = s->last_dc[0];
+    memset(s->c.last_mv, 0, sizeof(s->c.last_mv));
+}
 
 #endif /* AVCODEC_MPEG12ENC_H */

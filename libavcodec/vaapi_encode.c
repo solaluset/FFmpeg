@@ -31,7 +31,7 @@
 #include "vaapi_encode.h"
 #include "encode.h"
 #include "avcodec.h"
-#include "refstruct.h"
+#include "libavutil/refstruct.h"
 
 const AVCodecHWConfigInternal *const ff_vaapi_encode_hw_configs[] = {
     HW_CONFIG_ENCODER_FRAMES(VAAPI, VAAPI),
@@ -52,7 +52,7 @@ static int vaapi_encode_make_packed_header(AVCodecContext *avctx,
         .has_emulation_bytes = 1,
     };
 
-    tmp = av_realloc_array(pic->param_buffers, sizeof(*tmp), pic->nb_param_buffers + 2);
+    tmp = av_realloc_array(pic->param_buffers, pic->nb_param_buffers + 2, sizeof(*tmp));
     if (!tmp)
         return AVERROR(ENOMEM);
     pic->param_buffers = tmp;
@@ -93,7 +93,7 @@ static int vaapi_encode_make_param_buffer(AVCodecContext *avctx,
     VABufferID *tmp;
     VABufferID buffer;
 
-    tmp = av_realloc_array(pic->param_buffers, sizeof(*tmp), pic->nb_param_buffers + 1);
+    tmp = av_realloc_array(pic->param_buffers, pic->nb_param_buffers + 1, sizeof(*tmp));
     if (!tmp)
         return AVERROR(ENOMEM);
     pic->param_buffers = tmp;
@@ -135,14 +135,13 @@ static int vaapi_encode_make_misc_param_buffer(AVCodecContext *avctx,
                                           buffer, buffer_size);
 }
 
-static int vaapi_encode_wait(AVCodecContext *avctx,
-                             VAAPIEncodePicture *pic)
+static int vaapi_encode_wait(AVCodecContext *avctx, FFHWBaseEncodePicture *base_pic)
 {
 #if VA_CHECK_VERSION(1, 9, 0)
     FFHWBaseEncodeContext *base_ctx = avctx->priv_data;
 #endif
     VAAPIEncodeContext *ctx = avctx->priv_data;
-    FFHWBaseEncodePicture *base_pic = &pic->base;
+    VAAPIEncodePicture *pic = base_pic->priv;
     VAStatus vas;
 
     av_assert0(base_pic->encode_issued);
@@ -267,14 +266,14 @@ static int vaapi_encode_make_tile_slice(AVCodecContext *avctx,
 }
 
 static int vaapi_encode_issue(AVCodecContext *avctx,
-                              const FFHWBaseEncodePicture *base_pic)
+                              FFHWBaseEncodePicture *base_pic)
 {
     FFHWBaseEncodeContext *base_ctx = avctx->priv_data;
     VAAPIEncodeContext         *ctx = avctx->priv_data;
-    VAAPIEncodePicture *pic = (VAAPIEncodePicture*)base_pic;
+    VAAPIEncodePicture         *pic = base_pic->priv;
     VAAPIEncodeSlice *slice;
     VAStatus vas;
-    int err, i;
+    int err = 0, i;
     char data[MAX_PARAM_BUFFER_SIZE];
     size_t bit_len;
     av_unused AVFrameSideData *sd;
@@ -314,15 +313,10 @@ static int vaapi_encode_issue(AVCodecContext *avctx,
 
     av_log(avctx, AV_LOG_DEBUG, "Input surface is %#x.\n", pic->input_surface);
 
-    err = av_hwframe_get_buffer(base_ctx->recon_frames_ref, base_pic->recon_image, 0);
-    if (err < 0) {
-        err = AVERROR(ENOMEM);
-        goto fail;
-    }
     pic->recon_surface = (VASurfaceID)(uintptr_t)base_pic->recon_image->data[3];
     av_log(avctx, AV_LOG_DEBUG, "Recon surface is %#x.\n", pic->recon_surface);
 
-    pic->output_buffer_ref = ff_refstruct_pool_get(ctx->output_buffer_pool);
+    pic->output_buffer_ref = av_refstruct_pool_get(ctx->output_buffer_pool);
     if (!pic->output_buffer_ref) {
         err = AVERROR(ENOMEM);
         goto fail;
@@ -364,7 +358,7 @@ static int vaapi_encode_issue(AVCodecContext *avctx,
     }
 
     if (ctx->codec->init_picture_params) {
-        err = ctx->codec->init_picture_params(avctx, pic);
+        err = ctx->codec->init_picture_params(avctx, base_pic);
         if (err < 0) {
             av_log(avctx, AV_LOG_ERROR, "Failed to initialise picture "
                    "parameters: %d.\n", err);
@@ -410,7 +404,7 @@ static int vaapi_encode_issue(AVCodecContext *avctx,
     if (ctx->va_packed_headers & VA_ENC_PACKED_HEADER_PICTURE &&
         ctx->codec->write_picture_header) {
         bit_len = 8 * sizeof(data);
-        err = ctx->codec->write_picture_header(avctx, pic, data, &bit_len);
+        err = ctx->codec->write_picture_header(avctx, base_pic, data, &bit_len);
         if (err < 0) {
             av_log(avctx, AV_LOG_ERROR, "Failed to write per-picture "
                    "header: %d.\n", err);
@@ -427,7 +421,7 @@ static int vaapi_encode_issue(AVCodecContext *avctx,
         for (i = 0;; i++) {
             size_t len = sizeof(data);
             int type;
-            err = ctx->codec->write_extra_buffer(avctx, pic, i, &type,
+            err = ctx->codec->write_extra_buffer(avctx, base_pic, i, &type,
                                                  data, &len);
             if (err == AVERROR_EOF)
                 break;
@@ -449,7 +443,7 @@ static int vaapi_encode_issue(AVCodecContext *avctx,
         for (i = 0;; i++) {
             int type;
             bit_len = 8 * sizeof(data);
-            err = ctx->codec->write_extra_header(avctx, pic, i, &type,
+            err = ctx->codec->write_extra_header(avctx, base_pic, i, &type,
                                                  data, &bit_len);
             if (err == AVERROR_EOF)
                 break;
@@ -493,7 +487,7 @@ static int vaapi_encode_issue(AVCodecContext *avctx,
         }
 
         if (ctx->codec->init_slice_params) {
-            err = ctx->codec->init_slice_params(avctx, pic, slice);
+            err = ctx->codec->init_slice_params(avctx, base_pic, slice);
             if (err < 0) {
                 av_log(avctx, AV_LOG_ERROR, "Failed to initialise slice "
                        "parameters: %d.\n", err);
@@ -655,7 +649,7 @@ fail_at_end:
     av_freep(&pic->param_buffers);
     av_freep(&pic->slices);
     av_freep(&pic->roi);
-    ff_refstruct_unref(&pic->output_buffer_ref);
+    av_refstruct_unref(&pic->output_buffer_ref);
     pic->output_buffer = VA_INVALID_ID;
     return err;
 }
@@ -765,29 +759,29 @@ static int vaapi_encode_get_coded_data(AVCodecContext *avctx,
         goto end;
 
 end:
-    ff_refstruct_unref(&ctx->coded_buffer_ref);
-    ff_refstruct_unref(&pic->output_buffer_ref);
+    av_refstruct_unref(&ctx->coded_buffer_ref);
+    av_refstruct_unref(&pic->output_buffer_ref);
     pic->output_buffer = VA_INVALID_ID;
 
     return ret;
 }
 
 static int vaapi_encode_output(AVCodecContext *avctx,
-                               const FFHWBaseEncodePicture *base_pic, AVPacket *pkt)
+                               FFHWBaseEncodePicture *base_pic, AVPacket *pkt)
 {
     FFHWBaseEncodeContext *base_ctx = avctx->priv_data;
     VAAPIEncodeContext         *ctx = avctx->priv_data;
-    VAAPIEncodePicture         *pic = (VAAPIEncodePicture*)base_pic;
+    VAAPIEncodePicture         *pic = base_pic->priv;
     AVPacket *pkt_ptr = pkt;
     int err;
 
-    err = vaapi_encode_wait(avctx, pic);
+    err = vaapi_encode_wait(avctx, base_pic);
     if (err < 0)
         return err;
 
     if (pic->non_independent_frame) {
         av_assert0(!ctx->coded_buffer_ref);
-        ctx->coded_buffer_ref = ff_refstruct_ref(pic->output_buffer_ref);
+        ctx->coded_buffer_ref = av_refstruct_ref(pic->output_buffer_ref);
 
         if (pic->tail_size) {
             if (base_ctx->tail_pkt->size) {
@@ -815,80 +809,68 @@ static int vaapi_encode_output(AVCodecContext *avctx,
                                           ctx->codec->flags & FLAG_TIMESTAMP_NO_DELAY);
 
 end:
-    ff_refstruct_unref(&pic->output_buffer_ref);
+    av_refstruct_unref(&pic->output_buffer_ref);
     pic->output_buffer = VA_INVALID_ID;
     return err;
 }
 
-static int vaapi_encode_discard(AVCodecContext *avctx,
-                                VAAPIEncodePicture *pic)
+static int vaapi_encode_discard(AVCodecContext *avctx, FFHWBaseEncodePicture *base_pic)
 {
-    FFHWBaseEncodePicture *base_pic = &pic->base;
+    VAAPIEncodePicture *pic = base_pic->priv;
 
-    vaapi_encode_wait(avctx, pic);
+    vaapi_encode_wait(avctx, base_pic);
 
     if (pic->output_buffer_ref) {
         av_log(avctx, AV_LOG_DEBUG, "Discard output for pic "
                "%"PRId64"/%"PRId64".\n",
                base_pic->display_order, base_pic->encode_order);
 
-        ff_refstruct_unref(&pic->output_buffer_ref);
+        av_refstruct_unref(&pic->output_buffer_ref);
         pic->output_buffer = VA_INVALID_ID;
     }
 
     return 0;
 }
 
-static FFHWBaseEncodePicture *vaapi_encode_alloc(AVCodecContext *avctx,
-                                                 const AVFrame *frame)
+static int vaapi_encode_init(AVCodecContext *avctx, FFHWBaseEncodePicture *pic)
 {
     VAAPIEncodeContext *ctx = avctx->priv_data;
-    VAAPIEncodePicture *pic;
-
-    pic = av_mallocz(sizeof(*pic));
-    if (!pic)
-        return NULL;
+    VAAPIEncodePicture *priv = pic->priv;
+    AVFrame *frame = pic->input_image;
 
     if (ctx->codec->picture_priv_data_size > 0) {
-        pic->base.priv_data = av_mallocz(ctx->codec->picture_priv_data_size);
-        if (!pic->base.priv_data) {
-            av_freep(&pic);
-            return NULL;
-        }
+        pic->codec_priv = av_mallocz(ctx->codec->picture_priv_data_size);
+        if (!pic->codec_priv)
+            return AVERROR(ENOMEM);
     }
 
-    pic->input_surface = (VASurfaceID)(uintptr_t)frame->data[3];
-    pic->recon_surface = VA_INVALID_ID;
-    pic->output_buffer = VA_INVALID_ID;
+    priv->input_surface = (VASurfaceID)(uintptr_t)frame->data[3];
+    priv->recon_surface = VA_INVALID_ID;
+    priv->output_buffer = VA_INVALID_ID;
 
-    return &pic->base;
+    return 0;
 }
 
-static int vaapi_encode_free(AVCodecContext *avctx,
-                             FFHWBaseEncodePicture *base_pic)
+static int vaapi_encode_free(AVCodecContext *avctx, FFHWBaseEncodePicture *pic)
 {
-    VAAPIEncodePicture *pic = (VAAPIEncodePicture*)base_pic;
+    VAAPIEncodePicture *priv = pic->priv;
     int i;
 
-    if (base_pic->encode_issued)
+    if (pic->encode_issued)
         vaapi_encode_discard(avctx, pic);
 
-    if (pic->slices) {
-        for (i = 0; i < pic->nb_slices; i++)
-            av_freep(&pic->slices[i].codec_slice_params);
+    if (priv->slices) {
+        for (i = 0; i < priv->nb_slices; i++)
+            av_freep(&priv->slices[i].codec_slice_params);
     }
 
-    ff_hw_base_encode_free(base_pic);
-
-    av_freep(&pic->param_buffers);
-    av_freep(&pic->slices);
+    av_freep(&priv->param_buffers);
+    av_freep(&priv->slices);
     // Output buffer should already be destroyed.
-    av_assert0(pic->output_buffer == VA_INVALID_ID);
+    av_assert0(priv->output_buffer == VA_INVALID_ID);
 
-    av_freep(&pic->codec_picture_params);
-    av_freep(&pic->roi);
-
-    av_free(pic);
+    av_freep(&priv->codec_picture_params);
+    av_freep(&priv->roi);
 
     return 0;
 }
@@ -1151,6 +1133,68 @@ fail:
     return err;
 }
 
+static av_cold int vaapi_encode_surface_alignment(av_unused AVCodecContext *avctx)
+{
+#if VA_CHECK_VERSION(1, 21, 0)
+    VAAPIEncodeContext *ctx = avctx->priv_data;
+    VASurfaceAttrib *attr_list = NULL;
+    unsigned int attr_count = 0;
+    VAConfigID va_config;
+    VAStatus vas;
+    int err = 0;
+
+    vas = vaCreateConfig(ctx->hwctx->display,
+                         ctx->va_profile, ctx->va_entrypoint,
+                         NULL, 0, &va_config);
+    if (vas != VA_STATUS_SUCCESS) {
+        av_log(avctx, AV_LOG_ERROR, "Failed to create temp encode pipeline "
+               "configuration: %d (%s).\n", vas, vaErrorStr(vas));
+        return AVERROR(EIO);
+    }
+
+    vas = vaQuerySurfaceAttributes(ctx->hwctx->display, va_config,
+                                   0, &attr_count);
+    if (vas != VA_STATUS_SUCCESS) {
+        av_log(avctx, AV_LOG_ERROR, "Failed to query surface attributes: "
+               "%d (%s).\n", vas, vaErrorStr(vas));
+        err = AVERROR_EXTERNAL;
+        goto fail;
+    }
+
+    attr_list = av_malloc(attr_count * sizeof(*attr_list));
+    if (!attr_list) {
+        err = AVERROR(ENOMEM);
+        goto fail;
+    }
+
+    vas = vaQuerySurfaceAttributes(ctx->hwctx->display, va_config,
+                                   attr_list, &attr_count);
+    if (vas != VA_STATUS_SUCCESS) {
+        av_log(avctx, AV_LOG_ERROR, "Failed to query surface attributes: "
+               "%d (%s).\n", vas, vaErrorStr(vas));
+        err = AVERROR_EXTERNAL;
+        goto fail;
+    }
+
+    for (unsigned int i = 0; i < attr_count; i++) {
+        if (attr_list[i].type == VASurfaceAttribAlignmentSize) {
+            ctx->surface_alignment_width =
+                1 << (attr_list[i].value.value.i & 0xf);
+            ctx->surface_alignment_height =
+                1 << ((attr_list[i].value.value.i & 0xf0) >> 4);
+            break;
+        }
+    }
+
+fail:
+    av_freep(&attr_list);
+    vaDestroyConfig(ctx->hwctx->display, va_config);
+    return err;
+#else
+    return 0;
+#endif
+}
+
 static const VAAPIEncodeRCMode vaapi_encode_rc_modes[] = {
     //                                  Bitrate   Quality
     //                                     | Maxrate | HRD/VBV
@@ -1250,7 +1294,8 @@ static av_cold int vaapi_encode_init_rate_control(AVCodecContext *avctx)
     // * If bitrate and quality are both set, try QVBR.
     // * If quality is set, try ICQ, then CQP.
     // * If bitrate and maxrate are set and have the same value, try CBR.
-    // * If a bitrate is set, try AVBR, then VBR, then CBR.
+    // * If bitrate is set and RC buffer size/occupancy is not, try AVBR.
+    // * If a bitrate is set, try VBR, then CBR.
     // * If no bitrate is set, try ICQ, then CQP.
 
 #define TRY_RC_MODE(mode, fail) do { \
@@ -1294,7 +1339,10 @@ static av_cold int vaapi_encode_init_rate_control(AVCodecContext *avctx)
         TRY_RC_MODE(RC_MODE_CBR, 0);
 
     if (avctx->bit_rate > 0) {
-        TRY_RC_MODE(RC_MODE_AVBR, 0);
+        // AVBR does not enforce RC buffer constraints
+        if (!avctx->rc_buffer_size && !avctx->rc_initial_buffer_occupancy)
+            TRY_RC_MODE(RC_MODE_AVBR, 0);
+
         TRY_RC_MODE(RC_MODE_VBR, 0);
         TRY_RC_MODE(RC_MODE_CBR, 0);
     } else {
@@ -2005,7 +2053,7 @@ static av_cold int vaapi_encode_init_roi(AVCodecContext *avctx)
     return 0;
 }
 
-static void vaapi_encode_free_output_buffer(FFRefStructOpaque opaque,
+static void vaapi_encode_free_output_buffer(AVRefStructOpaque opaque,
                                             void *obj)
 {
     AVCodecContext   *avctx = opaque.nc;
@@ -2018,7 +2066,7 @@ static void vaapi_encode_free_output_buffer(FFRefStructOpaque opaque,
     av_log(avctx, AV_LOG_DEBUG, "Freed output buffer %#x\n", buffer_id);
 }
 
-static int vaapi_encode_alloc_output_buffer(FFRefStructOpaque opaque, void *obj)
+static int vaapi_encode_alloc_output_buffer(AVRefStructOpaque opaque, void *obj)
 {
     AVCodecContext   *avctx = opaque.nc;
     FFHWBaseEncodeContext *base_ctx = avctx->priv_data;
@@ -2090,7 +2138,9 @@ static av_cold int vaapi_encode_create_recon_frames(AVCodecContext *avctx)
 }
 
 static const FFHWEncodePictureOperation vaapi_op = {
-    .alloc  = &vaapi_encode_alloc,
+    .priv_size = sizeof(VAAPIEncodePicture),
+
+    .init = &vaapi_encode_init,
 
     .issue  = &vaapi_encode_issue,
 
@@ -2124,6 +2174,10 @@ av_cold int ff_vaapi_encode_init(AVCodecContext *avctx)
     ctx->hwctx = base_ctx->device->hwctx;
 
     err = vaapi_encode_profile_entrypoint(avctx);
+    if (err < 0)
+        goto fail;
+
+    err = vaapi_encode_surface_alignment(avctx);
     if (err < 0)
         goto fail;
 
@@ -2203,7 +2257,7 @@ av_cold int ff_vaapi_encode_init(AVCodecContext *avctx)
     }
 
     ctx->output_buffer_pool =
-        ff_refstruct_pool_alloc_ext(sizeof(VABufferID), 0, avctx,
+        av_refstruct_pool_alloc_ext(sizeof(VABufferID), 0, avctx,
                                     &vaapi_encode_alloc_output_buffer, NULL,
                                     vaapi_encode_free_output_buffer, NULL);
     if (!ctx->output_buffer_pool) {
@@ -2304,15 +2358,17 @@ av_cold int ff_vaapi_encode_close(AVCodecContext *avctx)
         vaapi_encode_free(avctx, pic);
     }
 
-    ff_refstruct_pool_uninit(&ctx->output_buffer_pool);
+    av_refstruct_pool_uninit(&ctx->output_buffer_pool);
 
     if (ctx->va_context != VA_INVALID_ID) {
-        vaDestroyContext(ctx->hwctx->display, ctx->va_context);
+        if (ctx->hwctx)
+            vaDestroyContext(ctx->hwctx->display, ctx->va_context);
         ctx->va_context = VA_INVALID_ID;
     }
 
     if (ctx->va_config != VA_INVALID_ID) {
-        vaDestroyConfig(ctx->hwctx->display, ctx->va_config);
+        if (ctx->hwctx)
+            vaDestroyConfig(ctx->hwctx->display, ctx->va_config);
         ctx->va_config = VA_INVALID_ID;
     }
 

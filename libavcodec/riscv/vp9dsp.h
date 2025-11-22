@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Institue of Software Chinese Academy of Sciences (ISCAS).
+ * Copyright (c) 2024 Institute of Software Chinese Academy of Sciences (ISCAS).
  *
  * This file is part of FFmpeg.
  *
@@ -60,12 +60,6 @@ void ff_dc_129_16x16_rvv(uint8_t *dst, ptrdiff_t stride, const uint8_t *l,
                          const uint8_t *a);
 void ff_dc_129_8x8_rvv(uint8_t *dst, ptrdiff_t stride, const uint8_t *l,
                        const uint8_t *a);
-void ff_v_32x32_rvi(uint8_t *dst, ptrdiff_t stride, const uint8_t *l,
-                    const uint8_t *a);
-void ff_v_16x16_rvi(uint8_t *dst, ptrdiff_t stride, const uint8_t *l,
-                    const uint8_t *a);
-void ff_v_8x8_rvi(uint8_t *dst, ptrdiff_t stride, const uint8_t *l,
-                  const uint8_t *a);
 void ff_h_32x32_rvv(uint8_t *dst, ptrdiff_t stride, const uint8_t *l,
                     const uint8_t *a);
 void ff_h_16x16_rvv(uint8_t *dst, ptrdiff_t stride, const uint8_t *l,
@@ -113,27 +107,27 @@ void ff_avg_8tap_##type##_##SIZE##hv_rvv(uint8_t *dst, ptrdiff_t dststride,  \
                                          int h, int mx, int my);
 
 #define VP9_BILINEAR_RISCV_RVV_FUNC(SIZE)                                   \
-void ff_put_bilin_##SIZE##h_rvv(uint8_t *dst, ptrdiff_t dststride,         \
+void ff_put_vp9_bilin_##SIZE##h_rvv(uint8_t *dst, ptrdiff_t dststride,     \
                                 const uint8_t *src, ptrdiff_t srcstride,   \
                                 int h, int mx, int my);                    \
                                                                            \
-void ff_put_bilin_##SIZE##v_rvv(uint8_t *dst, ptrdiff_t dststride,         \
+void ff_put_vp9_bilin_##SIZE##v_rvv(uint8_t *dst, ptrdiff_t dststride,     \
                                 const uint8_t *src, ptrdiff_t srcstride,   \
                                 int h, int mx, int my);                    \
                                                                            \
-void ff_put_bilin_##SIZE##hv_rvv(uint8_t *dst, ptrdiff_t dststride,        \
+void ff_put_vp9_bilin_##SIZE##hv_rvv(uint8_t *dst, ptrdiff_t dststride,    \
                                  const uint8_t *src, ptrdiff_t srcstride,  \
                                  int h, int mx, int my);                   \
                                                                            \
-void ff_avg_bilin_##SIZE##h_rvv(uint8_t *dst, ptrdiff_t dststride,         \
+void ff_avg_vp9_bilin_##SIZE##h_rvv(uint8_t *dst, ptrdiff_t dststride,     \
                                 const uint8_t *src, ptrdiff_t srcstride,   \
                                 int h, int mx, int my);                    \
                                                                            \
-void ff_avg_bilin_##SIZE##v_rvv(uint8_t *dst, ptrdiff_t dststride,         \
+void ff_avg_vp9_bilin_##SIZE##v_rvv(uint8_t *dst, ptrdiff_t dststride,     \
                                 const uint8_t *src, ptrdiff_t srcstride,   \
                                 int h, int mx, int my);                    \
                                                                            \
-void ff_avg_bilin_##SIZE##hv_rvv(uint8_t *dst, ptrdiff_t dststride,        \
+void ff_avg_vp9_bilin_##SIZE##hv_rvv(uint8_t *dst, ptrdiff_t dststride,    \
                                  const uint8_t *src, ptrdiff_t srcstride,  \
                                  int h, int mx, int my);
 

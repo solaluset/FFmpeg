@@ -427,15 +427,21 @@ static int avi_extract_stream_metadata(AVFormatContext *s, AVStream *st)
     tag = bytestream2_get_le32(&gb);
 
     switch (tag) {
-    case MKTAG('A', 'V', 'I', 'F'):
+    case MKTAG('A', 'V', 'I', 'F'): {
+        AVExifMetadata ifd = { 0 };
+        int ret;
         // skip 4 byte padding
         bytestream2_skip(&gb, 4);
         offset = bytestream2_tell(&gb);
 
         // decode EXIF tags from IFD, AVI is always little-endian
-        return avpriv_exif_decode_ifd(s, data + offset, data_size - offset,
-                                      1, 0, &st->metadata);
-        break;
+        ret = av_exif_parse_buffer(s, data + offset, data_size - offset, &ifd, AV_EXIF_ASSUME_LE);
+        if (ret < 0)
+            return ret;
+        ret = av_exif_ifd_to_dict(s, &ifd, &st->metadata);
+        av_exif_free(&ifd);
+        return ret;
+    }
     case MKTAG('C', 'A', 'S', 'I'):
         avpriv_request_sample(s, "RIFF stream data tag type CASI (%u)", tag);
         break;
@@ -1122,6 +1128,10 @@ static int read_gab2_sub(AVFormatContext *s, AVStream *st, AVPacket *pkt)
         int size;
         AVProbeData pd;
         unsigned int desc_len;
+
+        if (ast->sub_ctx)
+            return 0;
+
         AVIOContext *pb = avio_alloc_context(pkt->data + 7,
                                              pkt->size - 7,
                                              0, NULL, NULL, NULL, NULL);

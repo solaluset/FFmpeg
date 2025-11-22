@@ -74,7 +74,7 @@ static int8_t vaapi_av1_get_bit_depth_idx(AVCodecContext *avctx)
     return bit_depth == 8 ? 0 : bit_depth == 10 ? 1 : 2;
 }
 
-static int vaapi_av1_decode_init(AVCodecContext *avctx)
+static av_cold int vaapi_av1_decode_init(AVCodecContext *avctx)
 {
     VAAPIAV1DecContext *ctx = avctx->internal->hwaccel_priv_data;
 
@@ -92,7 +92,7 @@ static int vaapi_av1_decode_init(AVCodecContext *avctx)
     return ff_vaapi_decode_init(avctx);
 }
 
-static int vaapi_av1_decode_uninit(AVCodecContext *avctx)
+static av_cold int vaapi_av1_decode_uninit(AVCodecContext *avctx)
 {
     VAAPIAV1DecContext *ctx = avctx->internal->hwaccel_priv_data;
 
@@ -108,6 +108,7 @@ static int vaapi_av1_decode_uninit(AVCodecContext *avctx)
 
 
 static int vaapi_av1_start_frame(AVCodecContext *avctx,
+                                 av_unused const AVBufferRef *buffer_ref,
                                  av_unused const uint8_t *buffer,
                                  av_unused uint32_t size)
 {
@@ -404,14 +405,15 @@ static int vaapi_av1_decode_slice(AVCodecContext *avctx,
 
     nb_params = s->tg_end - s->tg_start + 1;
     if (ctx->nb_slice_params < nb_params) {
-        ctx->slice_params = av_realloc_array(ctx->slice_params,
-                                             nb_params,
-                                             sizeof(*ctx->slice_params));
-        if (!ctx->slice_params) {
+        VASliceParameterBufferAV1 *tmp = av_realloc_array(ctx->slice_params,
+                                                          nb_params,
+                                                          sizeof(*ctx->slice_params));
+        if (!tmp) {
             ctx->nb_slice_params = 0;
             err = AVERROR(ENOMEM);
             goto fail;
         }
+        ctx->slice_params    = tmp;
         ctx->nb_slice_params = nb_params;
     }
 

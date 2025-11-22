@@ -116,7 +116,11 @@ typedef struct SnowContext{
     RangeCoder c;
     HpelDSPContext hdsp;
     VideoDSPContext vdsp;
-    H264QpelContext h264qpel;
+    union {
+        /// everything except size 2 are from H.264
+        qpel_mc_func put_snow_qpel_pixels_tab[4][16];
+        H264QpelContext h264qpel;
+    };
     SnowDWTContext dwt;
     AVFrame *input_picture;              ///< new_picture with the internal linesizes
     AVFrame *current_picture;
@@ -181,7 +185,6 @@ extern int ff_scale_mv_ref[MAX_REF_FRAMES][MAX_REF_FRAMES];
 int ff_snow_common_init(AVCodecContext *avctx);
 int ff_snow_common_init_after_header(AVCodecContext *avctx);
 void ff_snow_common_end(SnowContext *s);
-void ff_snow_release_buffer(AVCodecContext *avctx);
 void ff_snow_reset_contexts(SnowContext *s);
 int ff_snow_alloc_blocks(SnowContext *s);
 int ff_snow_frames_prepare(SnowContext *s);
@@ -273,7 +276,8 @@ static av_always_inline void add_yblock(SnowContext *s, int sliced, slice_buffer
 
     if(!sliced && offset_dst)
         dst += src_x + src_y*dst_stride;
-    dst8+= src_x + src_y*src_stride;
+    if (sliced || add)
+        dst8+= src_x + src_y*src_stride;
 //    src += src_x + src_y*src_stride;
 
     ptmp= tmp + 3*tmp_step;

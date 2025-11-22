@@ -23,6 +23,7 @@
 #include <stdio.h>
 
 #include "cmdutils.h"
+#include "fopen_utf8.h"
 #include "opt_common.h"
 
 #include "libavutil/avassert.h"
@@ -60,8 +61,6 @@
 #include "libswresample/swresample.h"
 #include "libswresample/version.h"
 
-#include "libpostproc/postprocess.h"
-#include "libpostproc/version.h"
 
 enum show_muxdemuxers {
     SHOW_DEFAULT,
@@ -191,7 +190,6 @@ static void print_all_libs_info(int flags, int level)
     PRINT_LIB_INFO(avfilter,   AVFILTER,   flags, level);
     PRINT_LIB_INFO(swscale,    SWSCALE,    flags, level);
     PRINT_LIB_INFO(swresample, SWRESAMPLE, flags, level);
-    PRINT_LIB_INFO(postproc,   POSTPROC,   flags, level);
 }
 
 static void print_program_info(int flags, int level)
@@ -262,22 +260,36 @@ int show_buildconf(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-#define PRINT_CODEC_SUPPORTED(codec, field, type, list_name, term, get_name) \
-    if (codec->field) {                                                      \
-        const type *p = codec->field;                                        \
-                                                                             \
-        printf("    Supported " list_name ":");                              \
-        while (*p != term) {                                                 \
-            get_name(*p);                                                    \
-            printf(" %s", name);                                             \
-            p++;                                                             \
-        }                                                                    \
-        printf("\n");                                                        \
-    }                                                                        \
+#define PRINT_CODEC_SUPPORTED(codec, config, type, name, elem, fmt, ...)        \
+    do {                                                                        \
+        int num = 0;                                                            \
+        const type *elem = NULL;                                                \
+        avcodec_get_supported_config(NULL, codec, config, 0,                    \
+                                     (const void **) &elem, &num);              \
+        if (elem) {                                                             \
+            printf("    Supported " name ":");                                  \
+            for (int i = 0; i < num; i++) {                                     \
+                printf(" " fmt, __VA_ARGS__);                                   \
+                elem++;                                                         \
+            }                                                                   \
+            printf("\n");                                                       \
+        }                                                                       \
+    } while (0)
+
+static const char *get_channel_layout_desc(const AVChannelLayout *layout, AVBPrint *bp)
+{
+    int ret;
+    av_bprint_clear(bp);
+    ret = av_channel_layout_describe_bprint(layout, bp);
+    if (!av_bprint_is_complete(bp) || ret < 0)
+        return "unknown/invalid";
+    return bp->str;
+}
 
 static void print_codec(const AVCodec *c)
 {
     int encoder = av_codec_is_encoder(c);
+    AVBPrint desc;
 
     printf("%s %s [%s]:\n", encoder ? "Encoder" : "Decoder", c->name,
            c->long_name ? c->long_name : "");
@@ -343,35 +355,20 @@ static void print_codec(const AVCodec *c)
         printf("\n");
     }
 
-    if (c->supported_framerates) {
-        const AVRational *fps = c->supported_framerates;
+    PRINT_CODEC_SUPPORTED(c, AV_CODEC_CONFIG_FRAME_RATE, AVRational, "framerates",
+                          fps, "%d/%d", fps->num, fps->den);
+    PRINT_CODEC_SUPPORTED(c, AV_CODEC_CONFIG_PIX_FORMAT, enum AVPixelFormat,
+                          "pixel formats", fmt,  "%s", av_get_pix_fmt_name(*fmt));
+    PRINT_CODEC_SUPPORTED(c, AV_CODEC_CONFIG_SAMPLE_RATE, int, "sample rates",
+                          rate, "%d", *rate);
+    PRINT_CODEC_SUPPORTED(c, AV_CODEC_CONFIG_SAMPLE_FORMAT, enum AVSampleFormat,
+                          "sample formats", fmt, "%s", av_get_sample_fmt_name(*fmt));
 
-        printf("    Supported framerates:");
-        while (fps->num) {
-            printf(" %d/%d", fps->num, fps->den);
-            fps++;
-        }
-        printf("\n");
-    }
-    PRINT_CODEC_SUPPORTED(c, pix_fmts, enum AVPixelFormat, "pixel formats",
-                          AV_PIX_FMT_NONE, GET_PIX_FMT_NAME);
-    PRINT_CODEC_SUPPORTED(c, supported_samplerates, int, "sample rates", 0,
-                          GET_SAMPLE_RATE_NAME);
-    PRINT_CODEC_SUPPORTED(c, sample_fmts, enum AVSampleFormat, "sample formats",
-                          AV_SAMPLE_FMT_NONE, GET_SAMPLE_FMT_NAME);
-
-    if (c->ch_layouts) {
-        const AVChannelLayout *p = c->ch_layouts;
-
-        printf("    Supported channel layouts:");
-        while (p->nb_channels) {
-            char name[128];
-            av_channel_layout_describe(p, name, sizeof(name));
-            printf(" %s", name);
-            p++;
-        }
-        printf("\n");
-    }
+    av_bprint_init(&desc, 0, AV_BPRINT_SIZE_AUTOMATIC);
+    PRINT_CODEC_SUPPORTED(c, AV_CODEC_CONFIG_CHANNEL_LAYOUT, AVChannelLayout,
+                          "channel layouts", layout, "%s",
+                          get_channel_layout_desc(layout, &desc));
+    av_bprint_finalize(&desc, NULL);
 
     if (c->priv_class) {
         show_help_children(c->priv_class,
@@ -566,8 +563,15 @@ static void show_help_bsf(const char *name)
     }
 
     printf("Bit stream filter %s\n", bsf->name);
-    PRINT_CODEC_SUPPORTED(bsf, codec_ids, enum AVCodecID, "codecs",
-                          AV_CODEC_ID_NONE, GET_CODEC_NAME);
+    if (bsf->codec_ids) {
+        const enum AVCodecID *id = bsf->codec_ids;
+        printf("    Supported codecs:");
+        while (*id != AV_CODEC_ID_NONE) {
+            printf(" %s", avcodec_descriptor_get(*id)->name);
+            id++;
+        }
+        printf("\n");
+    }
     if (bsf->priv_class)
         show_help_children(bsf->priv_class, AV_OPT_FLAG_BSF_PARAM);
 }
@@ -802,11 +806,11 @@ int show_filters(void *optctx, const char *opt, const char *arg)
     printf("Filters:\n"
            "  T.. = Timeline support\n"
            "  .S. = Slice threading\n"
-           "  ..C = Command support\n"
            "  A = Audio input/output\n"
            "  V = Video input/output\n"
            "  N = Dynamic number and/or type of input/output\n"
-           "  | = Source or sink filter\n");
+           "  | = Source or sink filter\n"
+           "  ------\n");
     while ((filter = av_filter_iterate(&opaque))) {
         descr_cur = descr;
         for (i = 0; i < 2; i++) {
@@ -827,10 +831,9 @@ int show_filters(void *optctx, const char *opt, const char *arg)
                                   ( i && (filter->flags & AVFILTER_FLAG_DYNAMIC_OUTPUTS))) ? 'N' : '|';
         }
         *descr_cur = 0;
-        printf(" %c%c%c %-17s %-10s %s\n",
+        printf(" %c%c %-17s %-10s %s\n",
                filter->flags & AVFILTER_FLAG_SUPPORT_TIMELINE ? 'T' : '.',
                filter->flags & AVFILTER_FLAG_SLICE_THREADS    ? 'S' : '.',
-               filter->process_command                        ? 'C' : '.',
                filter->name, descr, filter->description);
     }
 #else
@@ -989,7 +992,7 @@ int show_pix_fmts(void *optctx, const char *opt, const char *arg)
 #endif
 
     while ((pix_desc = av_pix_fmt_desc_next(pix_desc))) {
-        enum AVPixelFormat av_unused pix_fmt = av_pix_fmt_desc_get_id(pix_desc);
+        av_unused enum AVPixelFormat pix_fmt = av_pix_fmt_desc_get_id(pix_desc);
         printf("%c%c%c%c%c %-16s       %d            %3d      %d",
                sws_isSupportedInput (pix_fmt)              ? 'I' : '.',
                sws_isSupportedOutput(pix_fmt)              ? 'O' : '.',
@@ -1203,7 +1206,7 @@ int init_report(const char *env, FILE **file)
     if (!envlevel)
         report_file_level = FFMAX(report_file_level, prog_loglevel);
 
-    report_file = fopen(filename.str, "w");
+    report_file = fopen_utf8(filename.str, "w");
     if (!report_file) {
         int ret = AVERROR(errno);
         av_log(NULL, AV_LOG_ERROR, "Failed to open report \"%s\": %s\n",
@@ -1288,6 +1291,18 @@ int opt_loglevel(void *optctx, const char *opt, const char *arg)
             } else {
                 flags |= AV_LOG_PRINT_LEVEL;
             }
+        } else if (av_strstart(token, "time", &arg)) {
+            if (cmd == '-') {
+                flags &= ~AV_LOG_PRINT_TIME;
+            } else {
+                flags |= AV_LOG_PRINT_TIME;
+            }
+        } else if (av_strstart(token, "datetime", &arg)) {
+            if (cmd == '-') {
+                flags &= ~AV_LOG_PRINT_DATETIME;
+            } else {
+                flags |= AV_LOG_PRINT_DATETIME;
+            }
         } else {
             break;
         }
@@ -1314,6 +1329,11 @@ int opt_loglevel(void *optctx, const char *opt, const char *arg)
                "Possible levels are numbers or:\n", arg);
         for (i = 0; i < FF_ARRAY_ELEMS(log_levels); i++)
             av_log(NULL, AV_LOG_FATAL, "\"%s\"\n", log_levels[i].name);
+        av_log(NULL, AV_LOG_FATAL, "Possible flags are:\n");
+        av_log(NULL, AV_LOG_FATAL, "\"repeat\"\n");
+        av_log(NULL, AV_LOG_FATAL, "\"level\"\n");
+        av_log(NULL, AV_LOG_FATAL, "\"time\"\n");
+        av_log(NULL, AV_LOG_FATAL, "\"datetime\"\n");
         return AVERROR(EINVAL);
     }
 

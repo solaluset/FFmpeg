@@ -34,9 +34,9 @@
 #include "libavutil/pixdesc.h"
 #include "avfilter.h"
 #include "drawutils.h"
+#include "filters.h"
 #include "formats.h"
 #include "framesync.h"
-#include "internal.h"
 #include "video.h"
 
 #if CONFIG_LIBVMAF_CUDA_FILTER
@@ -149,20 +149,20 @@ static int do_vmaf(FFFrameSync *fs)
 
     err = copy_picture_data(ref, &pic_ref, s->bpc);
     if (err) {
-        av_log(s, AV_LOG_ERROR, "problem during vmaf_picture_alloc.\n");
+        av_log(ctx, AV_LOG_ERROR, "problem during vmaf_picture_alloc.\n");
         return AVERROR(ENOMEM);
     }
 
     err = copy_picture_data(dist, &pic_dist, s->bpc);
     if (err) {
-        av_log(s, AV_LOG_ERROR, "problem during vmaf_picture_alloc.\n");
+        av_log(ctx, AV_LOG_ERROR, "problem during vmaf_picture_alloc.\n");
         vmaf_picture_unref(&pic_ref);
         return AVERROR(ENOMEM);
     }
 
     err = vmaf_read_pictures(s->vmaf, &pic_ref, &pic_dist, s->frame_cnt++);
     if (err) {
-        av_log(s, AV_LOG_ERROR, "problem during vmaf_read_pictures.\n");
+        av_log(ctx, AV_LOG_ERROR, "problem during vmaf_read_pictures.\n");
         return AVERROR(EINVAL);
     }
 
@@ -497,6 +497,8 @@ static int config_output(AVFilterLink *outlink)
     AVFilterContext *ctx = outlink->src;
     LIBVMAFContext *s = ctx->priv;
     AVFilterLink *mainlink = ctx->inputs[0];
+    FilterLink *il = ff_filter_link(mainlink);
+    FilterLink *ol = ff_filter_link(outlink);
     int ret;
 
     ret = ff_framesync_init_dualinput(&s->fs, ctx);
@@ -506,7 +508,7 @@ static int config_output(AVFilterLink *outlink)
     outlink->h = mainlink->h;
     outlink->time_base = mainlink->time_base;
     outlink->sample_aspect_ratio = mainlink->sample_aspect_ratio;
-    outlink->frame_rate = mainlink->frame_rate;
+    ol->frame_rate = il->frame_rate;
     if ((ret = ff_framesync_configure(&s->fs)) < 0)
         return ret;
 
@@ -615,15 +617,15 @@ static const AVFilterPad libvmaf_outputs[] = {
     },
 };
 
-const AVFilter ff_vf_libvmaf = {
-    .name          = "libvmaf",
-    .description   = NULL_IF_CONFIG_SMALL("Calculate the VMAF between two video streams."),
+const FFFilter ff_vf_libvmaf = {
+    .p.name        = "libvmaf",
+    .p.description = NULL_IF_CONFIG_SMALL("Calculate the VMAF between two video streams."),
+    .p.priv_class  = &libvmaf_class,
     .preinit       = libvmaf_framesync_preinit,
     .init          = init,
     .uninit        = uninit,
     .activate      = activate,
     .priv_size     = sizeof(LIBVMAFContext),
-    .priv_class    = &libvmaf_class,
     FILTER_INPUTS(libvmaf_inputs),
     FILTER_OUTPUTS(libvmaf_outputs),
     FILTER_PIXFMTS_ARRAY(pix_fmts),
@@ -651,7 +653,8 @@ static int config_props_cuda(AVFilterLink *outlink)
     AVFilterContext *ctx = outlink->src;
     LIBVMAFContext *s = ctx->priv;
     AVFilterLink *inlink = ctx->inputs[0];
-    AVHWFramesContext *frames_ctx = (AVHWFramesContext*) inlink->hw_frames_ctx->data;
+    FilterLink      *inl = ff_filter_link(inlink);
+    AVHWFramesContext *frames_ctx = (AVHWFramesContext*) inl->hw_frames_ctx->data;
     AVCUDADeviceContext *device_hwctx = frames_ctx->device_ctx->hwctx;
     CUcontext cu_ctx = device_hwctx->cuda_ctx;
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(frames_ctx->sw_format);
@@ -677,7 +680,7 @@ static int config_props_cuda(AVFilterLink *outlink)
     };
 
     if (!format_is_supported(frames_ctx->sw_format)) {
-        av_log(s, AV_LOG_ERROR,
+        av_log(ctx, AV_LOG_ERROR,
                "Unsupported input format: %s\n", desc->name);
         return AVERROR(EINVAL);
     }
@@ -756,7 +759,8 @@ static int do_vmaf_cuda(FFFrameSync* fs)
     AVFilterContext* ctx = fs->parent;
     LIBVMAFContext* s = ctx->priv;
     AVFilterLink *inlink = ctx->inputs[0];
-    AVHWFramesContext *frames_ctx = (AVHWFramesContext*) inlink->hw_frames_ctx->data;
+    FilterLink      *inl = ff_filter_link(inlink);
+    AVHWFramesContext *frames_ctx = (AVHWFramesContext*)inl->hw_frames_ctx->data;
     AVCUDADeviceContext *device_hwctx = frames_ctx->device_ctx->hwctx;
     VmafPicture pic_ref, pic_dist;
     AVFrame *ref, *dist;
@@ -772,20 +776,20 @@ static int do_vmaf_cuda(FFFrameSync* fs)
     err = copy_picture_data_cuda(s->vmaf, device_hwctx, ref, &pic_ref,
                                  frames_ctx->sw_format);
     if (err) {
-        av_log(s, AV_LOG_ERROR, "problem during copy_picture_data_cuda.\n");
+        av_log(ctx, AV_LOG_ERROR, "problem during copy_picture_data_cuda.\n");
         return AVERROR(ENOMEM);
     }
 
     err = copy_picture_data_cuda(s->vmaf, device_hwctx, dist, &pic_dist,
                                  frames_ctx->sw_format);
     if (err) {
-        av_log(s, AV_LOG_ERROR, "problem during copy_picture_data_cuda.\n");
+        av_log(ctx, AV_LOG_ERROR, "problem during copy_picture_data_cuda.\n");
         return AVERROR(ENOMEM);
     }
 
     err = vmaf_read_pictures(s->vmaf, &pic_ref, &pic_dist, s->frame_cnt++);
     if (err) {
-        av_log(s, AV_LOG_ERROR, "problem during vmaf_read_pictures.\n");
+        av_log(ctx, AV_LOG_ERROR, "problem during vmaf_read_pictures.\n");
         return AVERROR(EINVAL);
     }
 
@@ -807,15 +811,15 @@ static const AVFilterPad libvmaf_outputs_cuda[] = {
     },
 };
 
-const AVFilter ff_vf_libvmaf_cuda = {
-    .name           = "libvmaf_cuda",
-    .description    = NULL_IF_CONFIG_SMALL("Calculate the VMAF between two video streams."),
+const FFFilter ff_vf_libvmaf_cuda = {
+    .p.name         = "libvmaf_cuda",
+    .p.description  = NULL_IF_CONFIG_SMALL("Calculate the VMAF between two video streams."),
+    .p.priv_class   = &libvmaf_class,
     .preinit        = libvmaf_framesync_preinit,
     .init           = init_cuda,
     .uninit         = uninit,
     .activate       = activate,
     .priv_size      = sizeof(LIBVMAFContext),
-    .priv_class     = &libvmaf_class,
     FILTER_INPUTS(libvmaf_inputs),
     FILTER_OUTPUTS(libvmaf_outputs_cuda),
     FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),

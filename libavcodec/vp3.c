@@ -35,6 +35,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "libavutil/attributes.h"
 #include "libavutil/emms.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/mem.h"
@@ -50,7 +51,7 @@
 #include "jpegquanttables.h"
 #include "mathops.h"
 #include "progressframe.h"
-#include "refstruct.h"
+#include "libavutil/refstruct.h"
 #include "thread.h"
 #include "videodsp.h"
 #include "vp3data.h"
@@ -324,7 +325,7 @@ typedef struct Vp3DecodeContext {
     HuffTable huffman_table[5 * 16];
 
     uint8_t filter_limit_values[64];
-    DECLARE_ALIGNED(8, int, bounding_values_array)[256 + 2];
+    DECLARE_ALIGNED(16, int, bounding_values_array)[256 + 4];
 
     VP4Predictor * dc_pred_row; /* dc_pred_row[y_superblock_width * 4] */
 } Vp3DecodeContext;
@@ -349,7 +350,7 @@ static av_cold void free_tables(AVCodecContext *avctx)
     av_freep(&s->motion_val[1]);
 }
 
-static void vp3_decode_flush(AVCodecContext *avctx)
+static av_cold void vp3_decode_flush(AVCodecContext *avctx)
 {
     Vp3DecodeContext *s = avctx->priv_data;
 
@@ -370,7 +371,7 @@ static av_cold int vp3_decode_end(AVCodecContext *avctx)
     /* release all frames */
     vp3_decode_flush(avctx);
 
-    ff_refstruct_unref(&s->coeff_vlc);
+    av_refstruct_unref(&s->coeff_vlc);
 
     return 0;
 }
@@ -2030,7 +2031,7 @@ static int vp4_mc_loop_filter(Vp3DecodeContext *s, int plane, int motion_x, int 
              plane_height);
 
 #define safe_loop_filter(name, ptr, stride, bounding_values) \
-    if ((uintptr_t)(ptr) & 7) \
+    if (VP3_LOOP_FILTER_NO_UNALIGNED_SUPPORT && (uintptr_t)(ptr) & 7) \
         s->vp3dsp.name##_unaligned(ptr, stride, bounding_values); \
     else \
         s->vp3dsp.name(ptr, stride, bounding_values);
@@ -2346,7 +2347,7 @@ static av_cold int allocate_tables(AVCodecContext *avctx)
 }
 
 
-static av_cold void free_vlc_tables(FFRefStructOpaque unused, void *obj)
+static av_cold void free_vlc_tables(AVRefStructOpaque unused, void *obj)
 {
     CoeffVLCs *vlcs = obj;
 
@@ -2384,7 +2385,7 @@ static av_cold int vp3_decode_init(AVCodecContext *avctx)
     avctx->chroma_sample_location = AVCHROMA_LOC_CENTER;
     ff_hpeldsp_init(&s->hdsp, avctx->flags | AV_CODEC_FLAG_BITEXACT);
     ff_videodsp_init(&s->vdsp, 8);
-    ff_vp3dsp_init(&s->vp3dsp, avctx->flags);
+    ff_vp3dsp_init(&s->vp3dsp);
 
     for (int i = 0; i < 64; i++) {
 #define TRANSPOSE(x) (((x) >> 3) | (((x) & 7) << 3))
@@ -2459,7 +2460,7 @@ static av_cold int vp3_decode_init(AVCodecContext *avctx)
     }
 
     if (!avctx->internal->is_copy) {
-        CoeffVLCs *vlcs = ff_refstruct_alloc_ext(sizeof(*s->coeff_vlc), 0,
+        CoeffVLCs *vlcs = av_refstruct_alloc_ext(sizeof(*s->coeff_vlc), 0,
                                                  NULL, free_vlc_tables);
         if (!vlcs)
             return AVERROR(ENOMEM);
@@ -2527,7 +2528,7 @@ static int vp3_update_thread_context(AVCodecContext *dst, const AVCodecContext *
     const Vp3DecodeContext *s1 = src->priv_data;
     int qps_changed = 0;
 
-    ff_refstruct_replace(&s->coeff_vlc, s1->coeff_vlc);
+    av_refstruct_replace(&s->coeff_vlc, s1->coeff_vlc);
 
     // copy previous frame data
     ref_frames(s, s1);
@@ -2713,7 +2714,7 @@ static int vp3_decode_frame(AVCodecContext *avctx, AVFrame *frame,
                 mb_height_mul = get_bits(&gb, 5);
                 mb_height_div = get_bits(&gb, 3);
                 if (mb_width_mul != 1 || mb_width_div != 1 || mb_height_mul != 1 || mb_height_div != 1)
-                    avpriv_request_sample(s->avctx, "unexpected macroblock dimension multipler/divider");
+                    avpriv_request_sample(s->avctx, "unexpected macroblock dimension multiplier/divider");
 
                 if (get_bits(&gb, 2))
                     avpriv_request_sample(s->avctx, "unknown bits");

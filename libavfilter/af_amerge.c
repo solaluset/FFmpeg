@@ -32,7 +32,6 @@
 #include "filters.h"
 #include "audio.h"
 #include "formats.h"
-#include "internal.h"
 
 #define SWR_CH_MAX 64
 
@@ -246,8 +245,11 @@ static int try_push_frame(AVFilterContext *ctx, int nb_samples)
                                     av_make_q(1, outlink->sample_rate),
                                     outlink->time_base);
 
-    if ((ret = av_channel_layout_copy(&outbuf->ch_layout, &outlink->ch_layout)) < 0)
+    if ((ret = av_channel_layout_copy(&outbuf->ch_layout, &outlink->ch_layout)) < 0) {
+        free_frames(s->nb_inputs, inbuf);
+        av_frame_free(&outbuf);
         return ret;
+    }
 
     while (nb_samples) {
         /* Unroll the most common sample formats: speed +~350% for the loop,
@@ -339,17 +341,17 @@ static const AVFilterPad amerge_outputs[] = {
     },
 };
 
-const AVFilter ff_af_amerge = {
-    .name          = "amerge",
-    .description   = NULL_IF_CONFIG_SMALL("Merge two or more audio streams into "
+const FFFilter ff_af_amerge = {
+    .p.name        = "amerge",
+    .p.description = NULL_IF_CONFIG_SMALL("Merge two or more audio streams into "
                                           "a single multi-channel stream."),
+    .p.inputs      = NULL,
+    .p.priv_class  = &amerge_class,
+    .p.flags       = AVFILTER_FLAG_DYNAMIC_INPUTS,
     .priv_size     = sizeof(AMergeContext),
     .init          = init,
     .uninit        = uninit,
     .activate      = activate,
-    .inputs        = NULL,
     FILTER_OUTPUTS(amerge_outputs),
     FILTER_QUERY_FUNC(query_formats),
-    .priv_class    = &amerge_class,
-    .flags         = AVFILTER_FLAG_DYNAMIC_INPUTS,
 };

@@ -20,6 +20,7 @@
 
 #include <float.h>
 
+#include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/channel_layout.h"
 #include "libavutil/mem.h"
@@ -354,8 +355,9 @@ static void process_frame(AVFilterContext *ctx,
                           double *prior, double *prior_band_excit, int track_noise)
 {
     AVFilterLink *outlink = ctx->outputs[0];
+    FilterLink      *outl = ff_filter_link(outlink);
     const double *abs_var = dnch->abs_var;
-    const double ratio = outlink->frame_count_out ? s->ratio : 1.0;
+    const double ratio = outl->frame_count_out ? s->ratio : 1.0;
     const double rratio = 1. - ratio;
     const int *bin2band = s->bin2band;
     double *noisy_data = dnch->noisy_data;
@@ -376,6 +378,8 @@ static void process_frame(AVFilterContext *ctx,
         case AV_SAMPLE_FMT_DBLP:
             noisy_data[i] = mag = hypot(fft_data_dbl[i].re, fft_data_dbl[i].im);
             break;
+        default:
+            av_assert0(0);
         }
 
         power = mag * mag;
@@ -537,8 +541,9 @@ static void set_band_parameters(AudioFFTDeNoiseContext *s,
         dnch->noise_band_auto_var[i] = dnch->max_var * exp((process_get_band_noise(s, dnch, i) - 2.0) * C);
 }
 
-static void read_custom_noise(AudioFFTDeNoiseContext *s, int ch)
+static void read_custom_noise(AVFilterContext *ctx, int ch)
 {
+    AudioFFTDeNoiseContext *s = ctx->priv;
     DeNoiseChannel *dnch = &s->dnch[ch];
     char *custom_noise_str, *p, *arg, *saveptr = NULL;
     double band_noise[NB_PROFILE_BANDS] = { 0.f };
@@ -561,7 +566,7 @@ static void read_custom_noise(AudioFFTDeNoiseContext *s, int ch)
 
         ret = av_sscanf(arg, "%f", &noise);
         if (ret != 1) {
-            av_log(s, AV_LOG_ERROR, "Custom band noise must be float.\n");
+            av_log(ctx, AV_LOG_ERROR, "Custom band noise must be float.\n");
             break;
         }
 
@@ -731,7 +736,7 @@ static int config_input(AVFilterLink *inlink)
                 dnch->band_noise[i] = get_band_noise(s, i, 1.0, 500.0, 1.0E10);
             break;
         case CUSTOM_NOISE:
-            read_custom_noise(s, ch);
+            read_custom_noise(ctx, ch);
             break;
         default:
             return AVERROR_BUG;
@@ -970,6 +975,8 @@ static void sample_noise_block(AudioFFTDeNoiseContext *s,
             mag2 = fft_out_dbl[n].re * fft_out_dbl[n].re +
                    fft_out_dbl[n].im * fft_out_dbl[n].im;
             break;
+        default:
+            av_assert2(0);
         }
 
         mag2 = fmax(mag2, s->sample_floor);
@@ -1003,10 +1010,11 @@ static void finish_sample_noise(AudioFFTDeNoiseContext *s,
     }
 }
 
-static void set_noise_profile(AudioFFTDeNoiseContext *s,
+static void set_noise_profile(AVFilterContext *ctx,
                               DeNoiseChannel *dnch,
                               double *sample_noise)
 {
+    AudioFFTDeNoiseContext *s = ctx->priv;
     double new_band_noise[NB_PROFILE_BANDS];
     double temp[NB_PROFILE_BANDS];
     double sum = 0.0;
@@ -1030,13 +1038,13 @@ static void set_noise_profile(AudioFFTDeNoiseContext *s,
 
     reduce_mean(temp);
 
-    av_log(s, AV_LOG_INFO, "bn=");
+    av_log(ctx, AV_LOG_INFO, "bn=");
     for (int m = 0; m < NB_PROFILE_BANDS; m++) {
         new_band_noise[m] = temp[m];
         new_band_noise[m] = av_clipd(new_band_noise[m], -24.0, 24.0);
-        av_log(s, AV_LOG_INFO, "%f ", new_band_noise[m]);
+        av_log(ctx, AV_LOG_INFO, "%f ", new_band_noise[m]);
     }
-    av_log(s, AV_LOG_INFO, "\n");
+    av_log(ctx, AV_LOG_INFO, "\n");
     memcpy(dnch->band_noise, new_band_noise, sizeof(new_band_noise));
 }
 
@@ -1176,7 +1184,7 @@ static int output_frame(AVFilterLink *inlink, AVFrame *in)
             if (s->sample_noise_blocks <= 0)
                 break;
             finish_sample_noise(s, dnch, sample_noise);
-            set_noise_profile(s, dnch, sample_noise);
+            set_noise_profile(ctx, dnch, sample_noise);
             set_parameters(s, dnch, 1, 1);
         }
         s->sample_noise = 0;
@@ -1357,17 +1365,17 @@ static const AVFilterPad inputs[] = {
     },
 };
 
-const AVFilter ff_af_afftdn = {
-    .name            = "afftdn",
-    .description     = NULL_IF_CONFIG_SMALL("Denoise audio samples using FFT."),
+const FFFilter ff_af_afftdn = {
+    .p.name          = "afftdn",
+    .p.description   = NULL_IF_CONFIG_SMALL("Denoise audio samples using FFT."),
+    .p.priv_class    = &afftdn_class,
+    .p.flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL |
+                       AVFILTER_FLAG_SLICE_THREADS,
     .priv_size       = sizeof(AudioFFTDeNoiseContext),
-    .priv_class      = &afftdn_class,
     .activate        = activate,
     .uninit          = uninit,
     FILTER_INPUTS(inputs),
     FILTER_OUTPUTS(ff_audio_default_filterpad),
     FILTER_SAMPLEFMTS(AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_DBLP),
     .process_command = process_command,
-    .flags           = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL |
-                       AVFILTER_FLAG_SLICE_THREADS,
 };

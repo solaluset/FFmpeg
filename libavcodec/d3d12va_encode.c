@@ -107,10 +107,10 @@ static int d3d12va_discard_command_allocator(AVCodecContext *avctx, ID3D12Comman
 }
 
 static int d3d12va_encode_wait(AVCodecContext *avctx,
-                               D3D12VAEncodePicture *pic)
+                               FFHWBaseEncodePicture *base_pic)
 {
-    D3D12VAEncodeContext       *ctx = avctx->priv_data;
-    FFHWBaseEncodePicture *base_pic = &pic->base;
+    D3D12VAEncodeContext *ctx = avctx->priv_data;
+    D3D12VAEncodePicture *pic = base_pic->priv;
     uint64_t completion;
 
     av_assert0(base_pic->encode_issued);
@@ -186,12 +186,12 @@ static int d3d12va_encode_create_metadata_buffers(AVCodecContext *avctx,
 }
 
 static int d3d12va_encode_issue(AVCodecContext *avctx,
-                                const FFHWBaseEncodePicture *base_pic)
+                                FFHWBaseEncodePicture *base_pic)
 {
     FFHWBaseEncodeContext *base_ctx = avctx->priv_data;
     D3D12VAEncodeContext       *ctx = avctx->priv_data;
-    AVD3D12VAFramesContext *frames_hwctx = base_ctx->input_frames->hwctx;
-    D3D12VAEncodePicture *pic = (D3D12VAEncodePicture *)base_pic;
+    D3D12VAEncodePicture       *pic = base_pic->priv;
+    AVD3D12VAFramesContext     *frames_hwctx = base_ctx->input_frames->hwctx;
     int err, i, j;
     HRESULT hr;
     char data[MAX_PARAM_BUFFER_SIZE];
@@ -201,6 +201,8 @@ static int d3d12va_encode_issue(AVCodecContext *avctx,
     ID3D12VideoEncodeCommandList2 *cmd_list = ctx->command_list;
     D3D12_RESOURCE_BARRIER barriers[32] = { 0 };
     D3D12_VIDEO_ENCODE_REFERENCE_FRAMES d3d12_refs = { 0 };
+    int barriers_ref_index = 0;
+    D3D12_RESOURCE_BARRIER *barriers_ref = NULL;
 
     D3D12_VIDEO_ENCODER_ENCODEFRAME_INPUT_ARGUMENTS input_args = {
         .SequenceControlDesc = {
@@ -264,15 +266,11 @@ static int d3d12va_encode_issue(AVCodecContext *avctx,
 
     av_log(avctx, AV_LOG_DEBUG, "Input surface is %p.\n", pic->input_surface->texture);
 
-    err = av_hwframe_get_buffer(base_ctx->recon_frames_ref, base_pic->recon_image, 0);
-    if (err < 0) {
-        err = AVERROR(ENOMEM);
-        goto fail;
-    }
-
     pic->recon_surface = (AVD3D12VAFrame *)base_pic->recon_image->data[0];
     av_log(avctx, AV_LOG_DEBUG, "Recon surface is %p.\n",
            pic->recon_surface->texture);
+
+    pic->subresource_index = ctx->is_texture_array ? pic->recon_surface->subresource_index : 0;
 
     pic->output_buffer_ref = av_buffer_pool_get(ctx->output_buffer_pool);
     if (!pic->output_buffer_ref) {
@@ -288,7 +286,7 @@ static int d3d12va_encode_issue(AVCodecContext *avctx,
         goto fail;
 
     if (ctx->codec->init_picture_params) {
-        err = ctx->codec->init_picture_params(avctx, pic);
+        err = ctx->codec->init_picture_params(avctx, base_pic);
         if (err < 0) {
             av_log(avctx, AV_LOG_ERROR, "Failed to initialise picture "
                    "parameters: %d.\n", err);
@@ -305,21 +303,20 @@ static int d3d12va_encode_issue(AVCodecContext *avctx,
                        "header: %d.\n", err);
                 goto fail;
             }
+            pic->header_size = (int)bit_len / 8;
+            pic->aligned_header_size = pic->header_size % ctx->req.CompressedBitstreamBufferAccessAlignment ?
+                                    FFALIGN(pic->header_size, ctx->req.CompressedBitstreamBufferAccessAlignment) :
+                                    pic->header_size;
+
+            hr = ID3D12Resource_Map(pic->output_buffer, 0, NULL, (void **)&ptr);
+            if (FAILED(hr)) {
+                err = AVERROR_UNKNOWN;
+                goto fail;
+            }
+
+            memcpy(ptr, data, pic->aligned_header_size);
+            ID3D12Resource_Unmap(pic->output_buffer, 0, NULL);
         }
-
-        pic->header_size = (int)bit_len / 8;
-        pic->header_size = pic->header_size % ctx->req.CompressedBitstreamBufferAccessAlignment ?
-                           FFALIGN(pic->header_size, ctx->req.CompressedBitstreamBufferAccessAlignment) :
-                           pic->header_size;
-
-        hr = ID3D12Resource_Map(pic->output_buffer, 0, NULL, (void **)&ptr);
-        if (FAILED(hr)) {
-            err = AVERROR_UNKNOWN;
-            goto fail;
-        }
-
-        memcpy(ptr, data, pic->header_size);
-        ID3D12Resource_Unmap(pic->output_buffer, 0, NULL);
     }
 
     d3d12_refs.NumTexture2Ds = base_pic->nb_refs[0] + base_pic->nb_refs[1];
@@ -331,11 +328,28 @@ static int d3d12va_encode_issue(AVCodecContext *avctx,
             goto fail;
         }
 
+        if (ctx->is_texture_array) {
+            d3d12_refs.pSubresources = av_calloc(d3d12_refs.NumTexture2Ds,
+                                                 sizeof(*d3d12_refs.pSubresources));
+            if (!d3d12_refs.pSubresources) {
+                err = AVERROR(ENOMEM);
+                goto fail;
+            }
+        }
+
         i = 0;
-        for (j = 0; j < base_pic->nb_refs[0]; j++)
-            d3d12_refs.ppTexture2Ds[i++] = ((D3D12VAEncodePicture *)base_pic->refs[0][j])->recon_surface->texture;
-        for (j = 0; j < base_pic->nb_refs[1]; j++)
-            d3d12_refs.ppTexture2Ds[i++] = ((D3D12VAEncodePicture *)base_pic->refs[1][j])->recon_surface->texture;
+        for (j = 0; j < base_pic->nb_refs[0]; j++) {
+            d3d12_refs.ppTexture2Ds[i]  = ((D3D12VAEncodePicture *)base_pic->refs[0][j]->priv)->recon_surface->texture;
+            if (ctx->is_texture_array)
+                d3d12_refs.pSubresources[i] = ((D3D12VAEncodePicture *)base_pic->refs[0][j]->priv)->subresource_index;
+            i++;
+        }
+        for (j = 0; j < base_pic->nb_refs[1]; j++) {
+            d3d12_refs.ppTexture2Ds[i]  = ((D3D12VAEncodePicture *)base_pic->refs[1][j]->priv)->recon_surface->texture;
+            if (ctx->is_texture_array)
+                d3d12_refs.pSubresources[i] = ((D3D12VAEncodePicture *)base_pic->refs[1][j]->priv)->subresource_index;
+            i++;
+        }
     }
 
     input_args.PictureControlDesc.IntraRefreshFrameIndex  = 0;
@@ -344,12 +358,12 @@ static int d3d12va_encode_issue(AVCodecContext *avctx,
 
     input_args.PictureControlDesc.PictureControlCodecData = pic->pic_ctl;
     input_args.PictureControlDesc.ReferenceFrames         = d3d12_refs;
-    input_args.CurrentFrameBitstreamMetadataSize          = pic->header_size;
+    input_args.CurrentFrameBitstreamMetadataSize          = pic->aligned_header_size;
 
     output_args.Bitstream.pBuffer                                    = pic->output_buffer;
-    output_args.Bitstream.FrameStartOffset                           = pic->header_size;
+    output_args.Bitstream.FrameStartOffset                           = pic->aligned_header_size;
     output_args.ReconstructedPicture.pReconstructedPicture           = pic->recon_surface->texture;
-    output_args.ReconstructedPicture.ReconstructedPictureSubresource = 0;
+    output_args.ReconstructedPicture.ReconstructedPictureSubresource = ctx->is_texture_array ? pic->subresource_index : 0;
     output_args.EncoderOutputMetadata.pBuffer                        = pic->encoded_metadata;
     output_args.EncoderOutputMetadata.Offset                         = 0;
 
@@ -375,52 +389,89 @@ static int d3d12va_encode_issue(AVCodecContext *avctx,
         goto fail;
     }
 
-#define TRANSITION_BARRIER(res, before, after)                      \
+#define TRANSITION_BARRIER(res, subres, before, after)              \
     (D3D12_RESOURCE_BARRIER) {                                      \
         .Type  = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,            \
         .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,                  \
         .Transition = {                                             \
             .pResource   = res,                                     \
-            .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, \
+            .Subresource = subres,                                  \
             .StateBefore = before,                                  \
             .StateAfter  = after,                                   \
         },                                                          \
     }
 
     barriers[0] = TRANSITION_BARRIER(pic->input_surface->texture,
+                                     D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                      D3D12_RESOURCE_STATE_COMMON,
                                      D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
     barriers[1] = TRANSITION_BARRIER(pic->output_buffer,
+                                     D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                      D3D12_RESOURCE_STATE_COMMON,
                                      D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
-    barriers[2] = TRANSITION_BARRIER(pic->recon_surface->texture,
+    barriers[2] = TRANSITION_BARRIER(pic->encoded_metadata,
+                                     D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                      D3D12_RESOURCE_STATE_COMMON,
                                      D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
-    barriers[3] = TRANSITION_BARRIER(pic->encoded_metadata,
-                                     D3D12_RESOURCE_STATE_COMMON,
-                                     D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
-    barriers[4] = TRANSITION_BARRIER(pic->resolved_metadata,
+    barriers[3] = TRANSITION_BARRIER(pic->resolved_metadata,
+                                     D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                      D3D12_RESOURCE_STATE_COMMON,
                                      D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
 
-    ID3D12VideoEncodeCommandList2_ResourceBarrier(cmd_list, 5, barriers);
+    ID3D12VideoEncodeCommandList2_ResourceBarrier(cmd_list, 4, barriers);
 
-    if (d3d12_refs.NumTexture2Ds) {
-        D3D12_RESOURCE_BARRIER refs_barriers[3];
+    if (ctx->is_texture_array)
+        barriers_ref = av_calloc(base_ctx->recon_frames->initial_pool_size * ctx->plane_count,
+                                 sizeof(D3D12_RESOURCE_BARRIER));
+    else
+        barriers_ref = av_calloc(MAX_DPB_SIZE, sizeof(D3D12_RESOURCE_BARRIER));
 
-        for (i = 0; i < d3d12_refs.NumTexture2Ds; i++)
-            refs_barriers[i] = TRANSITION_BARRIER(d3d12_refs.ppTexture2Ds[i],
-                                                  D3D12_RESOURCE_STATE_COMMON,
-                                                  D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
+    if (ctx->is_texture_array) {
+        D3D12_RESOURCE_DESC references_tex_array_desc = { 0 };
+        pic->recon_surface->texture->lpVtbl->GetDesc(pic->recon_surface->texture, &references_tex_array_desc);
 
-        ID3D12VideoEncodeCommandList2_ResourceBarrier(cmd_list, d3d12_refs.NumTexture2Ds,
-                                                      refs_barriers);
+        for (uint32_t reference_subresource = 0; reference_subresource < references_tex_array_desc.DepthOrArraySize;
+             reference_subresource++) {
+
+            uint32_t array_size = references_tex_array_desc.DepthOrArraySize;
+            uint32_t mip_slice = reference_subresource % references_tex_array_desc.MipLevels;
+            uint32_t array_slice = (reference_subresource / references_tex_array_desc.MipLevels) % array_size;
+
+            for (uint32_t plane_slice = 0; plane_slice < ctx->plane_count; plane_slice++) {
+                uint32_t outputSubresource = mip_slice + array_slice * references_tex_array_desc.MipLevels +
+                                             plane_slice * references_tex_array_desc.MipLevels * array_size;
+                if (reference_subresource == pic->subresource_index) {
+                    barriers_ref[barriers_ref_index++] = TRANSITION_BARRIER(pic->recon_surface->texture, outputSubresource,
+                                                                            D3D12_RESOURCE_STATE_COMMON,
+                                                                            D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
+                } else {
+                    barriers_ref[barriers_ref_index++] = TRANSITION_BARRIER(pic->recon_surface->texture, outputSubresource,
+                                                                            D3D12_RESOURCE_STATE_COMMON,
+                                                                            D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
+                }
+            }
+        }
+    } else {
+        barriers_ref[barriers_ref_index++] = TRANSITION_BARRIER(pic->recon_surface->texture,
+                                                                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                                                D3D12_RESOURCE_STATE_COMMON,
+                                                                D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
+
+        if (d3d12_refs.NumTexture2Ds) {
+            for (i = 0; i < d3d12_refs.NumTexture2Ds; i++)
+                barriers_ref[barriers_ref_index++] = TRANSITION_BARRIER(d3d12_refs.ppTexture2Ds[i],
+                                                                        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                                                        D3D12_RESOURCE_STATE_COMMON,
+                                                                        D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
+        }
     }
+    ID3D12VideoEncodeCommandList2_ResourceBarrier(cmd_list, barriers_ref_index, barriers_ref);
 
     ID3D12VideoEncodeCommandList2_EncodeFrame(cmd_list, ctx->encoder, ctx->encoder_heap,
                                               &input_args, &output_args);
 
     barriers[3] = TRANSITION_BARRIER(pic->encoded_metadata,
+                                     D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                      D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE,
                                      D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
 
@@ -428,35 +479,32 @@ static int d3d12va_encode_issue(AVCodecContext *avctx,
 
     ID3D12VideoEncodeCommandList2_ResolveEncoderOutputMetadata(cmd_list, &input_metadata, &output_metadata);
 
-    if (d3d12_refs.NumTexture2Ds) {
-        D3D12_RESOURCE_BARRIER refs_barriers[3];
+    if (barriers_ref_index > 0) {
+        for (i = 0; i < barriers_ref_index; i++)
+            FFSWAP(D3D12_RESOURCE_STATES, barriers_ref[i].Transition.StateBefore, barriers_ref[i].Transition.StateAfter);
 
-        for (i = 0; i < d3d12_refs.NumTexture2Ds; i++)
-            refs_barriers[i] = TRANSITION_BARRIER(d3d12_refs.ppTexture2Ds[i],
-                                                  D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ,
-                                                  D3D12_RESOURCE_STATE_COMMON);
-
-        ID3D12VideoEncodeCommandList2_ResourceBarrier(cmd_list, d3d12_refs.NumTexture2Ds,
-                                                      refs_barriers);
+        ID3D12VideoEncodeCommandList2_ResourceBarrier(cmd_list, barriers_ref_index,
+                                                      barriers_ref);
     }
 
     barriers[0] = TRANSITION_BARRIER(pic->input_surface->texture,
+                                     D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                      D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ,
                                      D3D12_RESOURCE_STATE_COMMON);
     barriers[1] = TRANSITION_BARRIER(pic->output_buffer,
+                                     D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                      D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE,
                                      D3D12_RESOURCE_STATE_COMMON);
-    barriers[2] = TRANSITION_BARRIER(pic->recon_surface->texture,
-                                     D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE,
-                                     D3D12_RESOURCE_STATE_COMMON);
-    barriers[3] = TRANSITION_BARRIER(pic->encoded_metadata,
+    barriers[2] = TRANSITION_BARRIER(pic->encoded_metadata,
+                                     D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                      D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ,
                                      D3D12_RESOURCE_STATE_COMMON);
-    barriers[4] = TRANSITION_BARRIER(pic->resolved_metadata,
+    barriers[3] = TRANSITION_BARRIER(pic->resolved_metadata,
+                                     D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                                      D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE,
                                      D3D12_RESOURCE_STATE_COMMON);
 
-    ID3D12VideoEncodeCommandList2_ResourceBarrier(cmd_list, 5, barriers);
+    ID3D12VideoEncodeCommandList2_ResourceBarrier(cmd_list, 4, barriers);
 
     hr = ID3D12VideoEncodeCommandList2_Close(cmd_list);
     if (FAILED(hr)) {
@@ -495,6 +543,12 @@ static int d3d12va_encode_issue(AVCodecContext *avctx,
     if (d3d12_refs.ppTexture2Ds)
         av_freep(&d3d12_refs.ppTexture2Ds);
 
+    if (ctx->is_texture_array && d3d12_refs.pSubresources)
+        av_freep(&d3d12_refs.pSubresources);
+
+    if (barriers_ref)
+        av_freep(&barriers_ref);
+
     return 0;
 
 fail:
@@ -503,6 +557,12 @@ fail:
 
     if (d3d12_refs.ppTexture2Ds)
         av_freep(&d3d12_refs.ppTexture2Ds);
+
+    if (ctx->is_texture_array && d3d12_refs.pSubresources)
+        av_freep(&d3d12_refs.pSubresources);
+
+    if (barriers_ref)
+        av_freep(&barriers_ref);
 
     if (ctx->codec->free_picture_params)
         ctx->codec->free_picture_params(pic);
@@ -515,10 +575,11 @@ fail:
 }
 
 static int d3d12va_encode_discard(AVCodecContext *avctx,
-                                  D3D12VAEncodePicture *pic)
+                                  FFHWBaseEncodePicture *base_pic)
 {
-    FFHWBaseEncodePicture *base_pic = &pic->base;
-    d3d12va_encode_wait(avctx, pic);
+    D3D12VAEncodePicture *pic = base_pic->priv;
+
+    d3d12va_encode_wait(avctx, base_pic);
 
     if (pic->output_buffer_ref) {
         av_log(avctx, AV_LOG_DEBUG, "Discard output for pic "
@@ -560,44 +621,33 @@ static int d3d12va_encode_free_rc_params(AVCodecContext *avctx)
     return 0;
 }
 
-static FFHWBaseEncodePicture *d3d12va_encode_alloc(AVCodecContext *avctx,
-                                                   const AVFrame *frame)
+static int d3d12va_encode_init(AVCodecContext *avctx, FFHWBaseEncodePicture *pic)
 {
     D3D12VAEncodeContext *ctx = avctx->priv_data;
-    D3D12VAEncodePicture *pic;
-
-    pic = av_mallocz(sizeof(*pic));
-    if (!pic)
-        return NULL;
+    D3D12VAEncodePicture *priv = pic->priv;
+    AVFrame *frame = pic->input_image;
 
     if (ctx->codec->picture_priv_data_size > 0) {
-        pic->base.priv_data = av_mallocz(ctx->codec->picture_priv_data_size);
-        if (!pic->base.priv_data) {
-            av_freep(&pic);
-            return NULL;
-        }
+        pic->codec_priv = av_mallocz(ctx->codec->picture_priv_data_size);
+        if (!pic->codec_priv)
+            return AVERROR(ENOMEM);
     }
 
-    pic->input_surface = (AVD3D12VAFrame *)frame->data[0];
+    priv->input_surface = (AVD3D12VAFrame *)frame->data[0];
 
-    return &pic->base;
+    return 0;
 }
 
-static int d3d12va_encode_free(AVCodecContext *avctx,
-                               FFHWBaseEncodePicture *base_pic)
+static int d3d12va_encode_free(AVCodecContext *avctx, FFHWBaseEncodePicture *pic)
 {
     D3D12VAEncodeContext *ctx = avctx->priv_data;
-    D3D12VAEncodePicture *pic = (D3D12VAEncodePicture *)base_pic;
+    D3D12VAEncodePicture *priv = pic->priv;
 
-    if (base_pic->encode_issued)
+    if (pic->encode_issued)
         d3d12va_encode_discard(avctx, pic);
 
     if (ctx->codec->free_picture_params)
-        ctx->codec->free_picture_params(pic);
-
-    ff_hw_base_encode_free(base_pic);
-
-    av_free(pic);
+        ctx->codec->free_picture_params(priv);
 
     return 0;
 }
@@ -650,7 +700,7 @@ static int d3d12va_encode_get_coded_data(AVCodecContext *avctx,
         goto end;
 
     total_size += pic->header_size;
-    av_log(avctx, AV_LOG_DEBUG, "Output buffer size %"PRId64"\n", total_size);
+    av_log(avctx, AV_LOG_DEBUG, "Output buffer size %"SIZE_SPECIFIER"\n", total_size);
 
     hr = ID3D12Resource_Map(pic->output_buffer, 0, NULL, (void **)&mapped_data);
     if (FAILED(hr)) {
@@ -663,6 +713,12 @@ static int d3d12va_encode_get_coded_data(AVCodecContext *avctx,
         goto end;
     ptr = pkt->data;
 
+    memcpy(ptr, mapped_data, pic->header_size);
+
+    ptr += pic->header_size;
+    mapped_data += pic->aligned_header_size;
+    total_size -= pic->header_size;
+
     memcpy(ptr, mapped_data, total_size);
 
     ID3D12Resource_Unmap(pic->output_buffer, 0, NULL);
@@ -674,14 +730,14 @@ end:
 }
 
 static int d3d12va_encode_output(AVCodecContext *avctx,
-                                 const FFHWBaseEncodePicture *base_pic, AVPacket *pkt)
+                                 FFHWBaseEncodePicture *base_pic, AVPacket *pkt)
 {
     FFHWBaseEncodeContext *base_ctx = avctx->priv_data;
-    D3D12VAEncodePicture *pic = (D3D12VAEncodePicture *)base_pic;
+    D3D12VAEncodePicture *pic = base_pic->priv;
     AVPacket *pkt_ptr = pkt;
     int err;
 
-    err = d3d12va_encode_wait(avctx, pic);
+    err = d3d12va_encode_wait(avctx, base_pic);
     if (err < 0)
         return err;
 
@@ -796,6 +852,21 @@ static int d3d12va_encode_init_rate_control(AVCodecContext *avctx)
     int64_t hrd_initial_buffer_fullness;
     int fr_num, fr_den;
     const D3D12VAEncodeRCMode *rc_mode;
+
+#define SET_QP_RANGE(ctl) do { \
+        if (avctx->qmin > 0 || avctx->qmax > 0) { \
+            ctl->MinQP = avctx->qmin; \
+            ctl->MaxQP = avctx->qmax; \
+            ctx->rc.Flags |= D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_QP_RANGE; \
+        } \
+    } while(0)
+
+#define SET_MAX_FRAME_SIZE(ctl) do { \
+        if (ctx->max_frame_size > 0) { \
+            ctl->MaxFrameBitSize = ctx->max_frame_size * 8; \
+            ctx->rc.Flags |= D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_MAX_FRAME_SIZE; \
+        } \
+    } while(0)
 
     // Rate control mode selection:
     // * If the user has set a mode explicitly with the rc_mode option,
@@ -984,8 +1055,7 @@ rc_mode_found:
         case RC_MODE_CQP:
             // cqp ConfigParams will be updated in ctx->codec->configure.
             break;
-
-        case RC_MODE_CBR:
+        case RC_MODE_CBR: {
             D3D12_VIDEO_ENCODER_RATE_CONTROL_CBR *cbr_ctl;
 
             ctx->rc.ConfigParams.DataSize = sizeof(D3D12_VIDEO_ENCODER_RATE_CONTROL_CBR);
@@ -998,16 +1068,13 @@ rc_mode_found:
             cbr_ctl->InitialVBVFullness = hrd_initial_buffer_fullness;
             ctx->rc.Flags |= D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_VBV_SIZES;
 
-            if (avctx->qmin > 0 || avctx->qmax > 0) {
-                cbr_ctl->MinQP = avctx->qmin;
-                cbr_ctl->MaxQP = avctx->qmax;
-                ctx->rc.Flags |= D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_QP_RANGE;
-            }
+            SET_QP_RANGE(cbr_ctl);
+            SET_MAX_FRAME_SIZE(cbr_ctl);
 
             ctx->rc.ConfigParams.pConfiguration_CBR = cbr_ctl;
             break;
-
-        case RC_MODE_VBR:
+        }
+        case RC_MODE_VBR: {
             D3D12_VIDEO_ENCODER_RATE_CONTROL_VBR *vbr_ctl;
 
             ctx->rc.ConfigParams.DataSize = sizeof(D3D12_VIDEO_ENCODER_RATE_CONTROL_VBR);
@@ -1021,16 +1088,13 @@ rc_mode_found:
             vbr_ctl->InitialVBVFullness = hrd_initial_buffer_fullness;
             ctx->rc.Flags |= D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_VBV_SIZES;
 
-            if (avctx->qmin > 0 || avctx->qmax > 0) {
-                vbr_ctl->MinQP = avctx->qmin;
-                vbr_ctl->MaxQP = avctx->qmax;
-                ctx->rc.Flags |= D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_QP_RANGE;
-            }
+            SET_QP_RANGE(vbr_ctl);
+            SET_MAX_FRAME_SIZE(vbr_ctl);
 
             ctx->rc.ConfigParams.pConfiguration_VBR = vbr_ctl;
             break;
-
-        case RC_MODE_QVBR:
+        }
+        case RC_MODE_QVBR: {
             D3D12_VIDEO_ENCODER_RATE_CONTROL_QVBR *qvbr_ctl;
 
             ctx->rc.ConfigParams.DataSize = sizeof(D3D12_VIDEO_ENCODER_RATE_CONTROL_QVBR);
@@ -1042,15 +1106,12 @@ rc_mode_found:
             qvbr_ctl->PeakBitRate           = rc_peak_bitrate;
             qvbr_ctl->ConstantQualityTarget = rc_quality;
 
-            if (avctx->qmin > 0 || avctx->qmax > 0) {
-                qvbr_ctl->MinQP = avctx->qmin;
-                qvbr_ctl->MaxQP = avctx->qmax;
-                ctx->rc.Flags |= D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_QP_RANGE;
-            }
+            SET_QP_RANGE(qvbr_ctl);
+            SET_MAX_FRAME_SIZE(qvbr_ctl);
 
             ctx->rc.ConfigParams.pConfiguration_QVBR = qvbr_ctl;
             break;
-
+        }
         default:
             break;
     }
@@ -1098,13 +1159,15 @@ static int d3d12va_encode_init_gop_structure(AVCodecContext *avctx)
         switch (ctx->codec->d3d12_codec) {
             case D3D12_VIDEO_ENCODER_CODEC_H264:
                 ref_l0 = FFMIN(support.PictureSupport.pH264Support->MaxL0ReferencesForP,
-                               support.PictureSupport.pH264Support->MaxL1ReferencesForB);
+                               support.PictureSupport.pH264Support->MaxL1ReferencesForB ?
+                               support.PictureSupport.pH264Support->MaxL1ReferencesForB : UINT_MAX);
                 ref_l1 = support.PictureSupport.pH264Support->MaxL1ReferencesForB;
                 break;
 
             case D3D12_VIDEO_ENCODER_CODEC_HEVC:
                 ref_l0 = FFMIN(support.PictureSupport.pHEVCSupport->MaxL0ReferencesForP,
-                               support.PictureSupport.pHEVCSupport->MaxL1ReferencesForB);
+                               support.PictureSupport.pHEVCSupport->MaxL1ReferencesForB ?
+                               support.PictureSupport.pHEVCSupport->MaxL1ReferencesForB : UINT_MAX);
                 ref_l1 = support.PictureSupport.pHEVCSupport->MaxL1ReferencesForB;
                 break;
 
@@ -1162,7 +1225,7 @@ static int d3d12va_create_encoder_heap(AVCodecContext *avctx)
 
     D3D12_VIDEO_ENCODER_HEAP_DESC desc = {
         .NodeMask             = 0,
-        .Flags                = D3D12_VIDEO_ENCODER_FLAG_NONE,
+        .Flags                = D3D12_VIDEO_ENCODER_HEAP_FLAG_NONE,
         .EncodeCodec          = ctx->codec->d3d12_codec,
         .EncodeProfile        = ctx->profile->d3d12_profile,
         .EncodeLevel          = ctx->level,
@@ -1274,7 +1337,7 @@ static int d3d12va_encode_create_command_objects(AVCodecContext *avctx)
 {
     D3D12VAEncodeContext *ctx = avctx->priv_data;
     ID3D12CommandAllocator *command_allocator = NULL;
-    int err;
+    int err = AVERROR_UNKNOWN;
     HRESULT hr;
 
     D3D12_COMMAND_QUEUE_DESC queue_desc = {
@@ -1349,6 +1412,7 @@ fail:
 static int d3d12va_encode_create_recon_frames(AVCodecContext *avctx)
 {
     FFHWBaseEncodeContext *base_ctx = avctx->priv_data;
+    D3D12VAEncodeContext       *ctx = avctx->priv_data;
     AVD3D12VAFramesContext *hwctx;
     enum AVPixelFormat recon_format;
     int err;
@@ -1369,8 +1433,12 @@ static int d3d12va_encode_create_recon_frames(AVCodecContext *avctx)
     base_ctx->recon_frames->width     = base_ctx->surface_width;
     base_ctx->recon_frames->height    = base_ctx->surface_height;
 
-    hwctx->flags = D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY |
-                   D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    hwctx->resource_flags = D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY |
+                            D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    if (ctx->is_texture_array) {
+        base_ctx->recon_frames->initial_pool_size = MAX_DPB_SIZE + 1;
+        hwctx->flags |= AV_D3D12VA_FRAME_FLAG_TEXTURE_ARRAY;
+    }
 
     err = av_hwframe_ctx_init(base_ctx->recon_frames_ref);
     if (err < 0) {
@@ -1383,7 +1451,9 @@ static int d3d12va_encode_create_recon_frames(AVCodecContext *avctx)
 }
 
 static const FFHWEncodePictureOperation d3d12va_type = {
-    .alloc  = &d3d12va_encode_alloc,
+    .priv_size = sizeof(D3D12VAEncodePicture),
+
+    .init   = &d3d12va_encode_init,
 
     .issue  = &d3d12va_encode_issue,
 
@@ -1402,6 +1472,7 @@ int ff_d3d12va_encode_init(AVCodecContext *avctx)
     FFHWBaseEncodeContext *base_ctx = avctx->priv_data;
     D3D12VAEncodeContext       *ctx = avctx->priv_data;
     D3D12_FEATURE_DATA_VIDEO_FEATURE_AREA_SUPPORT support = { 0 };
+    D3D12_FEATURE_DATA_FORMAT_INFO format_info = { 0 };
     int err;
     HRESULT hr;
 
@@ -1437,6 +1508,15 @@ int ff_d3d12va_encode_init(AVCodecContext *avctx)
         goto fail;
     }
 
+    format_info.Format = ((AVD3D12VAFramesContext *)base_ctx->input_frames->hwctx)->format;
+    if (FAILED(ID3D12VideoDevice_CheckFeatureSupport(ctx->hwctx->device, D3D12_FEATURE_FORMAT_INFO,
+        &format_info, sizeof(format_info)))) {
+        av_log(avctx, AV_LOG_ERROR, "Failed to query format plane count: %#lx\n", hr);
+        err = AVERROR_EXTERNAL;
+        goto fail;
+    }
+    ctx->plane_count = format_info.PlaneCount;
+
     err = d3d12va_encode_set_profile(avctx);
     if (err < 0)
         goto fail;
@@ -1464,10 +1544,6 @@ int ff_d3d12va_encode_init(AVCodecContext *avctx)
     if (err < 0)
         goto fail;
 
-    err = d3d12va_encode_create_recon_frames(avctx);
-    if (err < 0)
-        goto fail;
-
     err = d3d12va_encode_prepare_output_buffers(avctx);
     if (err < 0)
         goto fail;
@@ -1492,6 +1568,10 @@ int ff_d3d12va_encode_init(AVCodecContext *avctx)
         if (err < 0)
             goto fail;
     }
+
+    err = d3d12va_encode_create_recon_frames(avctx);
+    if (err < 0)
+        goto fail;
 
     base_ctx->output_delay = base_ctx->b_per_p;
     base_ctx->decode_delay = base_ctx->max_b_depth;

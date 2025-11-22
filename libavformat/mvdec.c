@@ -47,7 +47,7 @@ typedef struct MvContext {
     int aformat;          ///< audio format
 } MvContext;
 
-/* these magic numbers are defined in moviefile.h on Silicon Grahpics IRIX */
+/* these magic numbers are defined in moviefile.h on Silicon Graphics IRIX */
 #define MOVIE_SOUND  1
 #define MOVIE_SILENT 2
 
@@ -256,7 +256,8 @@ static int read_table(AVFormatContext *avctx, AVStream *st,
         if (avio_feof(pb))
             return AVERROR_EOF;
 
-        avio_read(pb, name, 16);
+        if (avio_read(pb, name, 16) != 16)
+            return AVERROR_INVALIDDATA;
         name[sizeof(name) - 1] = 0;
         size = avio_rb32(pb);
         if (size < 0) {

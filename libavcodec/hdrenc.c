@@ -124,7 +124,7 @@ static int hdr_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     uint8_t *buf;
     int ret;
 
-    packet_size = avctx->width * avctx->height * 4LL + 1024LL;
+    packet_size = avctx->height * 4LL + avctx->width * avctx->height * 8LL + 1024LL;
     if ((ret = ff_get_encode_buffer(avctx, pkt, packet_size, 0)) < 0)
         return ret;
 
@@ -182,9 +182,6 @@ const FFCodec ff_hdr_encoder = {
     .init           = hdr_encode_init,
     FF_CODEC_ENCODE_CB(hdr_encode_frame),
     .close          = hdr_encode_close,
-    .p.pix_fmts     = (const enum AVPixelFormat[]){
-        AV_PIX_FMT_GBRPF32,
-        AV_PIX_FMT_NONE
-    },
+    CODEC_PIXFMTS(AV_PIX_FMT_GBRPF32),
     .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };

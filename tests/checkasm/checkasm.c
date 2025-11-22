@@ -18,6 +18,31 @@
  * You should have received a copy of the GNU General Public License along
  * with FFmpeg; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ * Copyright © 2018, VideoLAN and dav1d authors
+ * Copyright © 2018, Two Orioles, LLC
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "config.h"
@@ -33,6 +58,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "checkasm.h"
+#include "libavutil/avassert.h"
 #include "libavutil/common.h"
 #include "libavutil/cpu.h"
 #include "libavutil/intfloat.h"
@@ -69,6 +95,12 @@
 #define isatty(fd) 1
 #endif
 
+#if ARCH_AARCH64
+#include "libavutil/aarch64/cpu.h"
+#elif ARCH_RISCV
+#include "libavutil/riscv/cpu.h"
+#endif
+
 #if ARCH_ARM && HAVE_ARMV5TE_EXTERNAL
 #include "libavutil/arm/cpu.h"
 
@@ -97,6 +129,9 @@ static const struct {
     #if CONFIG_ALAC_DECODER
         { "alacdsp", checkasm_check_alacdsp },
     #endif
+    #if CONFIG_APV_DECODER
+        { "apv_dsp", checkasm_check_apv_dsp },
+    #endif
     #if CONFIG_AUDIODSP
         { "audiodsp", checkasm_check_audiodsp },
     #endif
@@ -106,8 +141,15 @@ static const struct {
     #if CONFIG_BSWAPDSP
         { "bswapdsp", checkasm_check_bswapdsp },
     #endif
+    #if CONFIG_CAVS_DECODER
+        { "cavsdsp", checkasm_check_cavsdsp },
+    #endif
     #if CONFIG_DCA_DECODER
+        { "dcadsp", checkasm_check_dcadsp },
         { "synth_filter", checkasm_check_synth_filter },
+    #endif
+    #if CONFIG_DIRAC_DECODER
+        { "diracdsp", checkasm_check_diracdsp },
     #endif
     #if CONFIG_EXR_DECODER
         { "exrdsp", checkasm_check_exrdsp },
@@ -146,6 +188,9 @@ static const struct {
         { "hevc_pel", checkasm_check_hevc_pel },
         { "hevc_sao", checkasm_check_hevc_sao },
     #endif
+    #if CONFIG_HPELDSP
+        { "hpeldsp", checkasm_check_hpeldsp },
+    #endif
     #if CONFIG_HUFFYUV_DECODER
         { "huffyuvdsp", checkasm_check_huffyuvdsp },
     #endif
@@ -170,11 +215,17 @@ static const struct {
     #if CONFIG_ME_CMP
         { "motion", checkasm_check_motion },
     #endif
+    #if CONFIG_MPEGVIDEOENCDSP
+        { "mpegvideoencdsp", checkasm_check_mpegvideoencdsp },
+    #endif
     #if CONFIG_OPUS_DECODER
         { "opusdsp", checkasm_check_opusdsp },
     #endif
     #if CONFIG_PIXBLOCKDSP
         { "pixblockdsp", checkasm_check_pixblockdsp },
+    #endif
+    #if CONFIG_QPELDSP
+        { "qpeldsp", checkasm_check_qpeldsp },
     #endif
     #if CONFIG_RV34DSP
         { "rv34dsp", checkasm_check_rv34dsp },
@@ -200,6 +251,9 @@ static const struct {
     #if CONFIG_VC1DSP
         { "vc1dsp", checkasm_check_vc1dsp },
     #endif
+    #if CONFIG_VP3DSP
+        { "vp3dsp", checkasm_check_vp3dsp },
+    #endif
     #if CONFIG_VP8DSP
         { "vp8dsp", checkasm_check_vp8dsp },
     #endif
@@ -215,11 +269,18 @@ static const struct {
     #if CONFIG_VVC_DECODER
         { "vvc_alf", checkasm_check_vvc_alf },
         { "vvc_mc",  checkasm_check_vvc_mc  },
+        { "vvc_sao", checkasm_check_vvc_sao },
     #endif
 #endif
 #if CONFIG_AVFILTER
+    #if CONFIG_SCENE_SAD
+        { "scene_sad", checkasm_check_scene_sad },
+    #endif
     #if CONFIG_AFIR_FILTER
         { "af_afir", checkasm_check_afir },
+    #endif
+    #if CONFIG_BLACKDETECT_FILTER
+        { "vf_blackdetect", checkasm_check_blackdetect },
     #endif
     #if CONFIG_BLEND_FILTER
         { "vf_blend", checkasm_check_blend },
@@ -227,17 +288,26 @@ static const struct {
     #if CONFIG_BWDIF_FILTER
         { "vf_bwdif", checkasm_check_vf_bwdif },
     #endif
+    #if CONFIG_COLORDETECT_FILTER
+        { "vf_colordetect", checkasm_check_colordetect },
+    #endif
     #if CONFIG_COLORSPACE_FILTER
         { "vf_colorspace", checkasm_check_colorspace },
     #endif
     #if CONFIG_EQ_FILTER
         { "vf_eq", checkasm_check_vf_eq },
     #endif
+    #if CONFIG_FSPP_FILTER
+        { "vf_fspp", checkasm_check_vf_fspp },
+    #endif
     #if CONFIG_GBLUR_FILTER
         { "vf_gblur", checkasm_check_vf_gblur },
     #endif
     #if CONFIG_HFLIP_FILTER
         { "vf_hflip", checkasm_check_vf_hflip },
+    #endif
+    #if CONFIG_IDET_FILTER
+        { "vf_idet", checkasm_check_idet },
     #endif
     #if CONFIG_NLMEANS_FILTER
         { "vf_nlmeans", checkasm_check_nlmeans },
@@ -255,8 +325,11 @@ static const struct {
     { "sw_rgb", checkasm_check_sw_rgb },
     { "sw_scale", checkasm_check_sw_scale },
     { "sw_yuv2rgb", checkasm_check_sw_yuv2rgb },
+    { "sw_yuv2yuv", checkasm_check_sw_yuv2yuv },
+    { "sw_ops", checkasm_check_sw_ops },
 #endif
 #if CONFIG_AVUTIL
+        { "aes",       checkasm_check_aes },
         { "fixed_dsp", checkasm_check_fixed_dsp },
         { "float_dsp", checkasm_check_float_dsp },
         { "lls",       checkasm_check_lls },
@@ -276,6 +349,8 @@ static const struct {
     { "NEON",     "neon",     AV_CPU_FLAG_NEON },
     { "DOTPROD",  "dotprod",  AV_CPU_FLAG_DOTPROD },
     { "I8MM",     "i8mm",     AV_CPU_FLAG_I8MM },
+    { "SVE",      "sve",      AV_CPU_FLAG_SVE },
+    { "SVE2",     "sve2",     AV_CPU_FLAG_SVE2 },
 #elif ARCH_ARM
     { "ARMV5TE",  "armv5te",  AV_CPU_FLAG_ARMV5TE },
     { "ARMV6",    "armv6",    AV_CPU_FLAG_ARMV6 },
@@ -291,15 +366,13 @@ static const struct {
 #elif ARCH_RISCV
     { "RVI",      "rvi",      AV_CPU_FLAG_RVI },
     { "misaligned", "misaligned", AV_CPU_FLAG_RV_MISALIGNED },
-    { "RVF",      "rvf",      AV_CPU_FLAG_RVF },
-    { "RVD",      "rvd",      AV_CPU_FLAG_RVD },
-    { "RVBaddr",  "rvb_a",    AV_CPU_FLAG_RVB_ADDR },
-    { "RVBbasic", "rvb_b",    AV_CPU_FLAG_RVB_BASIC },
-    { "RVVi32",   "rvv_i32",  AV_CPU_FLAG_RVV_I32 },
-    { "RVVf32",   "rvv_f32",  AV_CPU_FLAG_RVV_F32 },
-    { "RVVi64",   "rvv_i64",  AV_CPU_FLAG_RVV_I64 },
-    { "RVVf64",   "rvv_f64",  AV_CPU_FLAG_RVV_F64 },
-    { "RV_Zvbb",  "rv_zvbb",  AV_CPU_FLAG_RV_ZVBB },
+    { "RV_zbb",   "rvb_b",    AV_CPU_FLAG_RVB_BASIC },
+    { "RVB",      "rvb",      AV_CPU_FLAG_RVB },
+    { "RV_zve32x","rvv_i32",  AV_CPU_FLAG_RVV_I32 },
+    { "RV_zve32f","rvv_f32",  AV_CPU_FLAG_RVV_F32 },
+    { "RV_zve64x","rvv_i64",  AV_CPU_FLAG_RVV_I64 },
+    { "RV_zve64d","rvv_f64",  AV_CPU_FLAG_RVV_F64 },
+    { "RV_zvbb",  "rv_zvbb",  AV_CPU_FLAG_RV_ZVBB },
 #elif ARCH_MIPS
     { "MMI",      "mmi",      AV_CPU_FLAG_MMI },
     { "MSA",      "msa",      AV_CPU_FLAG_MSA },
@@ -325,6 +398,8 @@ static const struct {
 #elif ARCH_LOONGARCH
     { "LSX",      "lsx",      AV_CPU_FLAG_LSX },
     { "LASX",     "lasx",     AV_CPU_FLAG_LASX },
+#elif ARCH_WASM
+    { "SIMD128",    "simd128",  AV_CPU_FLAG_SIMD128 },
 #endif
     { NULL }
 };
@@ -362,8 +437,10 @@ static struct {
 
     int cpu_flag;
     const char *cpu_flag_name;
-    const char *test_name;
+    const char *test_pattern;
     int verbose;
+    int csv;
+    int tsv;
     volatile sig_atomic_t catch_signals;
 } state;
 
@@ -575,23 +652,46 @@ static int measure_nop_time(void)
     return nop_sum / 500;
 }
 
+static inline double avg_cycles_per_call(const CheckasmPerf *const p)
+{
+    if (p->iterations) {
+        const double cycles = (double)(10 * p->cycles) / p->iterations - state.nop_time;
+        if (cycles > 0.0)
+            return cycles / 32.0; /* 32 calls per iteration */
+    }
+    return 0.0;
+}
+
 /* Print benchmark results */
 static void print_benchs(CheckasmFunc *f)
 {
     if (f) {
+        CheckasmFuncVersion *v = &f->versions;
+        const CheckasmPerf *p = &v->perf;
+        const double baseline = avg_cycles_per_call(p);
+        double decicycles;
+
         print_benchs(f->child[0]);
 
-        /* Only print functions with at least one assembly version */
-        if (f->versions.cpu || f->versions.next) {
-            CheckasmFuncVersion *v = &f->versions;
-            do {
-                CheckasmPerf *p = &v->perf;
-                if (p->iterations) {
-                    int decicycles = (10*p->cycles/p->iterations - state.nop_time) / 4;
-                    printf("%s_%s: %d.%d\n", f->name, cpu_suffix(v->cpu), decicycles/10, decicycles%10);
+        do {
+            if (p->iterations) {
+                p = &v->perf;
+                decicycles = avg_cycles_per_call(p);
+                if (state.csv || state.tsv) {
+                    const char sep = state.csv ? ',' : '\t';
+                    printf("%s%c%s%c%.1f\n", f->name, sep,
+                           cpu_suffix(v->cpu), sep,
+                           decicycles / 10.0);
+                } else {
+                    const int pad_length = 10 + 50 -
+                        printf("%s_%s:", f->name, cpu_suffix(v->cpu));
+                    const double ratio = decicycles ?
+                        baseline / decicycles : 0.0;
+                    printf("%*.1f (%5.2fx)\n", FFMAX(pad_length, 0),
+                        decicycles / 10.0, ratio);
                 }
-            } while ((v = v->next));
-        }
+            }
+        } while ((v = v->next));
 
         print_benchs(f->child[1]);
     }
@@ -704,7 +804,7 @@ static LONG NTAPI signal_handler(EXCEPTION_POINTERS *e) {
     return EXCEPTION_CONTINUE_EXECUTION; /* never reached, but shuts up gcc */
 }
 #endif
-#else
+#elif !defined(_WASI_EMULATED_SIGNAL)
 static void signal_handler(int s);
 
 static const struct sigaction signal_handler_act = {
@@ -721,6 +821,22 @@ static void signal_handler(int s) {
 }
 #endif
 
+/* Compares a string with a wildcard pattern. */
+static int wildstrcmp(const char *str, const char *pattern)
+{
+    const char *wild = strchr(pattern, '*');
+    if (wild) {
+        const size_t len = wild - pattern;
+        if (strncmp(str, pattern, len)) return 1;
+        while (*++wild == '*');
+        if (!*wild) return 0;
+        str += len;
+        while (*str && wildstrcmp(str, wild)) str++;
+        return !*str;
+    }
+    return strcmp(str, pattern);
+}
+
 /* Perform tests and benchmarks for the specified cpu flag if supported by the host */
 static void check_cpu_flag(const char *name, int flag)
 {
@@ -736,7 +852,7 @@ static void check_cpu_flag(const char *name, int flag)
 
         state.cpu_flag_name = name;
         for (i = 0; tests[i].func; i++) {
-            if (state.test_name && strcmp(tests[i].name, state.test_name))
+            if (state.test_pattern && wildstrcmp(tests[i].name, state.test_pattern))
                 continue;
             state.current_test_name = tests[i].name;
             tests[i].func();
@@ -768,7 +884,7 @@ static int bench_init_linux(void)
 #endif
     };
 
-    printf("benchmarking with Linux Perf Monitoring API\n");
+    fprintf(stderr, "benchmarking with Linux Perf Monitoring API\n");
 
     state.sysfd = syscall(__NR_perf_event_open, &attr, 0, -1, -1, 0);
     if (state.sysfd == -1) {
@@ -795,7 +911,7 @@ static int bench_init_ffmpeg(void)
         fprintf(stderr, "checkasm: unable to execute platform specific timer\n");
         return -1;
     }
-    printf("benchmarking with native FFmpeg timers\n");
+    fprintf(stderr, "benchmarking with native FFmpeg timers\n");
     return 0;
 #else
     fprintf(stderr, "checkasm: --bench is not supported on your system\n");
@@ -817,7 +933,7 @@ static int bench_init(void)
         return ret;
 
     state.nop_time = measure_nop_time();
-    printf("nop: %d.%d\n", state.nop_time/10, state.nop_time%10);
+    fprintf(stderr, "nop: %d.%d\n", state.nop_time/10, state.nop_time%10);
     return 0;
 }
 
@@ -831,7 +947,12 @@ static void bench_uninit(void)
 static int usage(const char *path)
 {
     fprintf(stderr,
-            "Usage: %s [--bench] [--runs=<ptwo>] [--test=<pattern>] [--verbose] [seed]\n",
+            "Usage: %s [options...] [seed]\n"
+            "  --test=<pattern> Run specific test.\n"
+            "  --bench          Run benchmark.\n"
+            "  --csv, --tsv     Output results in rows of comma or tab separated values.\n"
+            "  --runs=<ptwo>    Manual number of benchmark iterations to run 2**<ptwo>.\n"
+            "  --verbose        Increase verbosity.\n",
             path);
     return 1;
 }
@@ -840,12 +961,13 @@ int main(int argc, char *argv[])
 {
     unsigned int seed = av_get_random_seed();
     int i, ret = 0;
+    char arch_info_buf[50] = "";
 
 #ifdef _WIN32
 #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
     AddVectoredExceptionHandler(0, signal_handler);
 #endif
-#else
+#elif !defined(_WASI_EMULATED_SIGNAL)
     sigaction(SIGBUS,  &signal_handler_act, NULL);
     sigaction(SIGFPE,  &signal_handler_act, NULL);
     sigaction(SIGILL,  &signal_handler_act, NULL);
@@ -876,9 +998,13 @@ int main(int argc, char *argv[])
                 state.bench_pattern = arg + 8;
                 state.bench_pattern_len = strlen(state.bench_pattern);
             } else
-                state.bench_pattern = "";
+                state.bench_pattern = "*";
         } else if (!strncmp(arg, "--test=", 7)) {
-            state.test_name = arg + 7;
+            state.test_pattern = arg + 7;
+        } else if (!strcmp(arg, "--csv")) {
+            state.csv = 1; state.tsv = 0;
+        } else if (!strcmp(arg, "--tsv")) {
+            state.csv = 0; state.tsv = 1;
         } else if (!strcmp(arg, "--verbose") || !strcmp(arg, "-v")) {
             state.verbose = 1;
         } else if (!strncmp(arg, "--runs=", 7)) {
@@ -900,7 +1026,16 @@ int main(int argc, char *argv[])
         }
     }
 
-    fprintf(stderr, "checkasm: using random seed %u\n", seed);
+#if ARCH_AARCH64 && HAVE_SVE
+    if (have_sve(av_get_cpu_flags()))
+        snprintf(arch_info_buf, sizeof(arch_info_buf),
+                 "SVE %d bits, ", 8 * ff_aarch64_sve_length());
+#elif ARCH_RISCV && HAVE_RVV
+    if (av_get_cpu_flags() & AV_CPU_FLAG_RVV_I32)
+        snprintf(arch_info_buf, sizeof (arch_info_buf),
+                 "%zu-bit vectors, ", 8 * ff_get_rv_vlenb());
+#endif
+    fprintf(stderr, "checkasm: %susing random seed %u\n", arch_info_buf, seed);
     av_lfg_init(&checkasm_lfg, seed);
 
     if (state.bench_pattern)
@@ -978,11 +1113,12 @@ void *checkasm_check_func(void *func, const char *name, ...)
 int checkasm_bench_func(void)
 {
     return !state.num_failed && state.bench_pattern &&
-           !strncmp(state.current_func->name, state.bench_pattern, state.bench_pattern_len);
+           !wildstrcmp(state.current_func->name, state.bench_pattern);
 }
 
-/* Indicate that the current test has failed */
-void checkasm_fail_func(const char *msg, ...)
+/* Indicate that the current test has failed, return whether verbose printing
+ * is requested. */
+int checkasm_fail_func(const char *msg, ...)
 {
     if (state.current_func_ver && state.current_func_ver->cpu &&
         state.current_func_ver->ok)
@@ -999,6 +1135,7 @@ void checkasm_fail_func(const char *msg, ...)
         state.current_func_ver->ok = 0;
         state.num_failed++;
     }
+    return state.verbose;
 }
 
 void checkasm_set_signal_handler_state(int enabled) {
@@ -1066,38 +1203,96 @@ void checkasm_report(const char *name, ...)
     }
 }
 
+static int check_err(const char *file, int line,
+                     const char *name, int w, int h,
+                     int *err)
+{
+    if (*err)
+        return 0;
+    if (!checkasm_fail_func("%s:%d", file, line))
+        return 1;
+    *err = 1;
+    fprintf(stderr, "%s (%dx%d):\n", name, w, h);
+    return 0;
+}
+
+#define DEF_CHECKASM_CHECK_BODY(compare, type, fmt) \
+do { \
+    int64_t aligned_w = (w - 1LL + align_w) & ~(align_w - 1); \
+    int64_t aligned_h = (h - 1LL + align_h) & ~(align_h - 1); \
+    int err = 0; \
+    int y = 0; \
+    av_assert0(aligned_w == (int32_t)aligned_w);\
+    av_assert0(aligned_h == (int32_t)aligned_h);\
+    stride1 /= sizeof(*buf1); \
+    stride2 /= sizeof(*buf2); \
+    for (y = 0; y < h; y++) \
+        if (!compare(&buf1[y*stride1], &buf2[y*stride2], w)) \
+            break; \
+    if (y != h) { \
+        if (check_err(file, line, name, w, h, &err)) \
+            return 1; \
+        for (y = 0; y < h; y++) { \
+            for (int x = 0; x < w; x++) \
+                fprintf(stderr, " " fmt, buf1[x]); \
+            fprintf(stderr, "    "); \
+            for (int x = 0; x < w; x++) \
+                fprintf(stderr, " " fmt, buf2[x]); \
+            fprintf(stderr, "    "); \
+            for (int x = 0; x < w; x++) \
+                fprintf(stderr, "%c", buf1[x] != buf2[x] ? 'x' : '.'); \
+            buf1 += stride1; \
+            buf2 += stride2; \
+            fprintf(stderr, "\n"); \
+        } \
+        buf1 -= h*stride1; \
+        buf2 -= h*stride2; \
+    } \
+    for (y = -padding; y < 0; y++) \
+        if (!compare(&buf1[y*stride1 - padding], &buf2[y*stride2 - padding], \
+                     w + 2*padding)) { \
+            if (check_err(file, line, name, w, h, &err)) \
+                return 1; \
+            fprintf(stderr, " overwrite above\n"); \
+            break; \
+        } \
+    for (y = aligned_h; y < aligned_h + padding; y++) \
+        if (!compare(&buf1[y*stride1 - padding], &buf2[y*stride2 - padding], \
+                     w + 2*padding)) { \
+            if (check_err(file, line, name, w, h, &err)) \
+                return 1; \
+            fprintf(stderr, " overwrite below\n"); \
+            break; \
+        } \
+    for (y = 0; y < h; y++) \
+        if (!compare(&buf1[y*stride1 - padding], &buf2[y*stride2 - padding], \
+                     padding)) { \
+            if (check_err(file, line, name, w, h, &err)) \
+                return 1; \
+            fprintf(stderr, " overwrite left\n"); \
+            break; \
+        } \
+    for (y = 0; y < h; y++) \
+        if (!compare(&buf1[y*stride1 + aligned_w], &buf2[y*stride2 + aligned_w], \
+                     padding)) { \
+            if (check_err(file, line, name, w, h, &err)) \
+                return 1; \
+            fprintf(stderr, " overwrite right\n"); \
+            break; \
+        } \
+    return err; \
+} while (0)
+
+#define cmp_int(a, b, len) (!memcmp(a, b, (len) * sizeof(*(a))))
 #define DEF_CHECKASM_CHECK_FUNC(type, fmt) \
 int checkasm_check_##type(const char *file, int line, \
                           const type *buf1, ptrdiff_t stride1, \
                           const type *buf2, ptrdiff_t stride2, \
-                          int w, int h, const char *name) \
+                          int w, int h, const char *name, \
+                          int align_w, int align_h, \
+                          int padding) \
 { \
-    int y = 0; \
-    stride1 /= sizeof(*buf1); \
-    stride2 /= sizeof(*buf2); \
-    for (y = 0; y < h; y++) \
-        if (memcmp(&buf1[y*stride1], &buf2[y*stride2], w*sizeof(*buf1))) \
-            break; \
-    if (y == h) \
-        return 0; \
-    checkasm_fail_func("%s:%d", file, line); \
-    if (!state.verbose) \
-        return 1; \
-    fprintf(stderr, "%s:\n", name); \
-    while (h--) { \
-        for (int x = 0; x < w; x++) \
-            fprintf(stderr, " " fmt, buf1[x]); \
-        fprintf(stderr, "    "); \
-        for (int x = 0; x < w; x++) \
-            fprintf(stderr, " " fmt, buf2[x]); \
-        fprintf(stderr, "    "); \
-        for (int x = 0; x < w; x++) \
-            fprintf(stderr, "%c", buf1[x] != buf2[x] ? 'x' : '.'); \
-        buf1 += stride1; \
-        buf2 += stride2; \
-        fprintf(stderr, "\n"); \
-    } \
-    return 1; \
+    DEF_CHECKASM_CHECK_BODY(cmp_int, type, fmt); \
 }
 
 DEF_CHECKASM_CHECK_FUNC(uint8_t,  "%02x")
@@ -1105,3 +1300,15 @@ DEF_CHECKASM_CHECK_FUNC(uint16_t, "%04x")
 DEF_CHECKASM_CHECK_FUNC(uint32_t, "%08x")
 DEF_CHECKASM_CHECK_FUNC(int16_t,  "%6d")
 DEF_CHECKASM_CHECK_FUNC(int32_t,  "%9d")
+
+int checkasm_check_float_ulp(const char *file, int line,
+                             const float *buf1, ptrdiff_t stride1,
+                             const float *buf2, ptrdiff_t stride2,
+                             int w, int h, const char *name,
+                             unsigned max_ulp, int align_w, int align_h,
+                             int padding)
+{
+    #define cmp_float(a, b, len) float_near_ulp_array(a, b, max_ulp, len)
+    DEF_CHECKASM_CHECK_BODY(cmp_float, float, "%g");
+    #undef cmp_float
+}

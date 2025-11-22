@@ -40,9 +40,8 @@ extern const AVCodecHWConfigInternal *const ff_d3d12va_encode_hw_configs[];
 #define D3D12VA_VIDEO_ENC_ASYNC_DEPTH 8
 
 typedef struct D3D12VAEncodePicture {
-    FFHWBaseEncodePicture base;
-
     int             header_size;
+    int             aligned_header_size;
 
     AVD3D12VAFrame *input_surface;
     AVD3D12VAFrame *recon_surface;
@@ -52,6 +51,8 @@ typedef struct D3D12VAEncodePicture {
 
     ID3D12Resource *encoded_metadata;
     ID3D12Resource *resolved_metadata;
+
+    int            subresource_index;
 
     D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA pic_ctl;
 
@@ -151,6 +152,11 @@ typedef struct D3D12VAEncodeContext {
     const struct D3D12VAEncodeType *codec;
 
     /**
+     * Max frame size
+     */
+    int max_frame_size;
+
+    /**
      * Explicitly set RC mode (otherwise attempt to pick from
      * available modes).
      */
@@ -189,6 +195,16 @@ typedef struct D3D12VAEncodeContext {
      * Pool of (reusable) bitstream output buffers.
      */
     AVBufferPool *output_buffer_pool;
+
+    /**
+     * Flag indicates if the HW is texture array mode.
+     */
+    int is_texture_array;
+
+    /**
+     * The number of planes in the input DXGI FORMAT.
+     */
+    int plane_count;
 
     /**
      * D3D12 video encoder.
@@ -302,7 +318,7 @@ typedef struct D3D12VAEncodeType {
     int (*init_sequence_params)(AVCodecContext *avctx);
 
     int (*init_picture_params)(AVCodecContext *avctx,
-                               D3D12VAEncodePicture *pic);
+                               FFHWBaseEncodePicture *base_pic);
 
     void (*free_picture_params)(D3D12VAEncodePicture *pic);
 
@@ -317,6 +333,12 @@ int ff_d3d12va_encode_receive_packet(AVCodecContext *avctx, AVPacket *pkt);
 
 int ff_d3d12va_encode_init(AVCodecContext *avctx);
 int ff_d3d12va_encode_close(AVCodecContext *avctx);
+
+#define D3D12VA_ENCODE_COMMON_OPTIONS \
+    { "max_frame_size", \
+      "Maximum frame size (in bytes)",\
+      OFFSET(common.max_frame_size), AV_OPT_TYPE_INT, \
+      { .i64 = 0 }, 0, INT_MAX / 8, FLAGS }
 
 #define D3D12VA_ENCODE_RC_MODE(name, desc) \
     { #name, desc, 0, AV_OPT_TYPE_CONST, { .i64 = RC_MODE_ ## name }, \

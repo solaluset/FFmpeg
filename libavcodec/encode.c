@@ -18,13 +18,12 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "libavutil/attributes.h"
 #include "libavutil/avassert.h"
 #include "libavutil/channel_layout.h"
 #include "libavutil/emms.h"
 #include "libavutil/frame.h"
-#include "libavutil/imgutils.h"
 #include "libavutil/internal.h"
+#include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/samplefmt.h"
@@ -214,21 +213,6 @@ int ff_encode_get_frame(AVCodecContext *avctx, AVFrame *frame)
 
     av_frame_move_ref(frame, avci->buffer_frame);
 
-#if FF_API_FRAME_KEY
-FF_DISABLE_DEPRECATION_WARNINGS
-    if (frame->key_frame)
-        frame->flags |= AV_FRAME_FLAG_KEY;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
-#if FF_API_INTERLACED_FRAME
-FF_DISABLE_DEPRECATION_WARNINGS
-    if (frame->interlaced_frame)
-        frame->flags |= AV_FRAME_FLAG_INTERLACED;
-    if (frame->top_field_first)
-        frame->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
-
     return 0;
 }
 
@@ -372,8 +356,6 @@ static int encode_receive_packet_internal(AVCodecContext *avctx, AVPacket *avpkt
     if (avctx->codec->type == AVMEDIA_TYPE_VIDEO) {
         if ((avctx->flags & AV_CODEC_FLAG_PASS1) && avctx->stats_out)
             avctx->stats_out[0] = '\0';
-        if (av_image_check_size2(avctx->width, avctx->height, avctx->max_pixels, AV_PIX_FMT_NONE, 0, avctx))
-            return AVERROR(EINVAL);
     }
 
     if (ffcodec(avctx->codec)->cb_type == FF_CODEC_CB_TYPE_RECEIVE_PACKET) {
@@ -563,37 +545,70 @@ static int encode_preinit_video(AVCodecContext *avctx)
 {
     const AVCodec *c = avctx->codec;
     const AVPixFmtDescriptor *pixdesc = av_pix_fmt_desc_get(avctx->pix_fmt);
-    int i;
+    const enum AVPixelFormat *pix_fmts;
+    int ret, i, num_pix_fmts;
 
-    if (!av_get_pix_fmt_name(avctx->pix_fmt)) {
+    if (!pixdesc) {
         av_log(avctx, AV_LOG_ERROR, "Invalid video pixel format: %d\n",
                avctx->pix_fmt);
         return AVERROR(EINVAL);
     }
 
-    if (c->pix_fmts) {
-        for (i = 0; c->pix_fmts[i] != AV_PIX_FMT_NONE; i++)
-            if (avctx->pix_fmt == c->pix_fmts[i])
+    ret = avcodec_get_supported_config(avctx, NULL, AV_CODEC_CONFIG_PIX_FORMAT,
+                                       0, (const void **) &pix_fmts, &num_pix_fmts);
+    if (ret < 0)
+        return ret;
+
+    if (pix_fmts) {
+        for (i = 0; i < num_pix_fmts; i++)
+            if (avctx->pix_fmt == pix_fmts[i])
                 break;
-        if (c->pix_fmts[i] == AV_PIX_FMT_NONE) {
+        if (i == num_pix_fmts) {
             av_log(avctx, AV_LOG_ERROR,
                    "Specified pixel format %s is not supported by the %s encoder.\n",
                    av_get_pix_fmt_name(avctx->pix_fmt), c->name);
 
             av_log(avctx, AV_LOG_ERROR, "Supported pixel formats:\n");
-            for (int p = 0; c->pix_fmts[p] != AV_PIX_FMT_NONE; p++) {
+            for (int p = 0; pix_fmts[p] != AV_PIX_FMT_NONE; p++) {
                 av_log(avctx, AV_LOG_ERROR, "  %s\n",
-                       av_get_pix_fmt_name(c->pix_fmts[p]));
+                       av_get_pix_fmt_name(pix_fmts[p]));
             }
 
             return AVERROR(EINVAL);
         }
-        if (c->pix_fmts[i] == AV_PIX_FMT_YUVJ420P ||
-            c->pix_fmts[i] == AV_PIX_FMT_YUVJ411P ||
-            c->pix_fmts[i] == AV_PIX_FMT_YUVJ422P ||
-            c->pix_fmts[i] == AV_PIX_FMT_YUVJ440P ||
-            c->pix_fmts[i] == AV_PIX_FMT_YUVJ444P)
+        if (pix_fmts[i] == AV_PIX_FMT_YUVJ420P ||
+            pix_fmts[i] == AV_PIX_FMT_YUVJ411P ||
+            pix_fmts[i] == AV_PIX_FMT_YUVJ422P ||
+            pix_fmts[i] == AV_PIX_FMT_YUVJ440P ||
+            pix_fmts[i] == AV_PIX_FMT_YUVJ444P)
             avctx->color_range = AVCOL_RANGE_JPEG;
+    }
+
+    if (pixdesc->flags & AV_PIX_FMT_FLAG_ALPHA) {
+        const enum AVAlphaMode *alpha_modes;
+        int num_alpha_modes;
+        ret = avcodec_get_supported_config(avctx, NULL, AV_CODEC_CONFIG_ALPHA_MODE,
+                                           0, (const void **) &alpha_modes, &num_alpha_modes);
+        if (ret < 0)
+            return ret;
+
+        if (avctx->alpha_mode != AVALPHA_MODE_UNSPECIFIED && alpha_modes) {
+            for (i = 0; i < num_alpha_modes; i++) {
+                if (avctx->alpha_mode == alpha_modes[i])
+                    break;
+            }
+            if (i == num_alpha_modes) {
+                av_log(avctx, AV_LOG_ERROR,
+                       "Specified alpha mode '%s' is not supported by the %s encoder.\n",
+                       av_alpha_mode_name(avctx->alpha_mode), c->name);
+                av_log(avctx, AV_LOG_ERROR, "Supported alpha modes:\n");
+                for (int p = 0; alpha_modes[p] != AVALPHA_MODE_UNSPECIFIED; p++) {
+                    av_log(avctx, AV_LOG_ERROR, "  %s\n",
+                           av_alpha_mode_name(alpha_modes[p]));
+                }
+                return AVERROR(EINVAL);
+            }
+        }
     }
 
     if (    avctx->bits_per_raw_sample < 0
@@ -606,20 +621,6 @@ static int encode_preinit_video(AVCodecContext *avctx)
         av_log(avctx, AV_LOG_ERROR, "dimensions not set\n");
         return AVERROR(EINVAL);
     }
-
-#if FF_API_TICKS_PER_FRAME
-FF_DISABLE_DEPRECATION_WARNINGS
-    if (avctx->ticks_per_frame && avctx->time_base.num &&
-        avctx->ticks_per_frame > INT_MAX / avctx->time_base.num) {
-        av_log(avctx, AV_LOG_ERROR,
-               "ticks_per_frame %d too large for the timebase %d/%d.",
-               avctx->ticks_per_frame,
-               avctx->time_base.num,
-               avctx->time_base.den);
-        return AVERROR(EINVAL);
-    }
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
 
     if (avctx->hw_frames_ctx) {
         AVHWFramesContext *frames_ctx = (AVHWFramesContext*)avctx->hw_frames_ctx->data;
@@ -646,66 +647,79 @@ FF_ENABLE_DEPRECATION_WARNINGS
 static int encode_preinit_audio(AVCodecContext *avctx)
 {
     const AVCodec *c = avctx->codec;
-    int i;
+    const enum AVSampleFormat *sample_fmts;
+    const int *supported_samplerates;
+    const AVChannelLayout *ch_layouts;
+    int ret, i, num_sample_fmts, num_samplerates, num_ch_layouts;
 
     if (!av_get_sample_fmt_name(avctx->sample_fmt)) {
         av_log(avctx, AV_LOG_ERROR, "Invalid audio sample format: %d\n",
                avctx->sample_fmt);
         return AVERROR(EINVAL);
     }
-    if (avctx->sample_rate <= 0) {
-        av_log(avctx, AV_LOG_ERROR, "Invalid audio sample rate: %d\n",
-               avctx->sample_rate);
-        return AVERROR(EINVAL);
-    }
 
-    if (c->sample_fmts) {
-        for (i = 0; c->sample_fmts[i] != AV_SAMPLE_FMT_NONE; i++) {
-            if (avctx->sample_fmt == c->sample_fmts[i])
+    ret = avcodec_get_supported_config(avctx, NULL, AV_CODEC_CONFIG_SAMPLE_FORMAT,
+                                       0, (const void **) &sample_fmts,
+                                       &num_sample_fmts);
+    if (ret < 0)
+        return ret;
+    if (sample_fmts) {
+        for (i = 0; i < num_sample_fmts; i++) {
+            if (avctx->sample_fmt == sample_fmts[i])
                 break;
             if (avctx->ch_layout.nb_channels == 1 &&
                 av_get_planar_sample_fmt(avctx->sample_fmt) ==
-                av_get_planar_sample_fmt(c->sample_fmts[i])) {
-                avctx->sample_fmt = c->sample_fmts[i];
+                av_get_planar_sample_fmt(sample_fmts[i])) {
+                avctx->sample_fmt = sample_fmts[i];
                 break;
             }
         }
-        if (c->sample_fmts[i] == AV_SAMPLE_FMT_NONE) {
+        if (i == num_sample_fmts) {
             av_log(avctx, AV_LOG_ERROR,
                    "Specified sample format %s is not supported by the %s encoder\n",
                    av_get_sample_fmt_name(avctx->sample_fmt), c->name);
 
             av_log(avctx, AV_LOG_ERROR, "Supported sample formats:\n");
-            for (int p = 0; c->sample_fmts[p] != AV_SAMPLE_FMT_NONE; p++) {
+            for (int p = 0; sample_fmts[p] != AV_SAMPLE_FMT_NONE; p++) {
                 av_log(avctx, AV_LOG_ERROR, "  %s\n",
-                       av_get_sample_fmt_name(c->sample_fmts[p]));
+                       av_get_sample_fmt_name(sample_fmts[p]));
             }
 
             return AVERROR(EINVAL);
         }
     }
-    if (c->supported_samplerates) {
-        for (i = 0; c->supported_samplerates[i] != 0; i++)
-            if (avctx->sample_rate == c->supported_samplerates[i])
+
+    ret = avcodec_get_supported_config(avctx, NULL, AV_CODEC_CONFIG_SAMPLE_RATE,
+                                       0, (const void **) &supported_samplerates,
+                                       &num_samplerates);
+    if (ret < 0)
+        return ret;
+    if (supported_samplerates) {
+        for (i = 0; i < num_samplerates; i++)
+            if (avctx->sample_rate == supported_samplerates[i])
                 break;
-        if (c->supported_samplerates[i] == 0) {
+        if (i == num_samplerates) {
             av_log(avctx, AV_LOG_ERROR,
                    "Specified sample rate %d is not supported by the %s encoder\n",
                    avctx->sample_rate, c->name);
 
             av_log(avctx, AV_LOG_ERROR, "Supported sample rates:\n");
-            for (int p = 0; c->supported_samplerates[p]; p++)
-                av_log(avctx, AV_LOG_ERROR, "  %d\n", c->supported_samplerates[p]);
+            for (int p = 0; supported_samplerates[p]; p++)
+                av_log(avctx, AV_LOG_ERROR, "  %d\n", supported_samplerates[p]);
 
             return AVERROR(EINVAL);
         }
     }
-    if (c->ch_layouts) {
-        for (i = 0; c->ch_layouts[i].nb_channels; i++) {
-            if (!av_channel_layout_compare(&avctx->ch_layout, &c->ch_layouts[i]))
+    ret = avcodec_get_supported_config(avctx, NULL, AV_CODEC_CONFIG_CHANNEL_LAYOUT,
+                                       0, (const void **) &ch_layouts, &num_ch_layouts);
+    if (ret < 0)
+        return ret;
+    if (ch_layouts) {
+        for (i = 0; i < num_ch_layouts; i++) {
+            if (!av_channel_layout_compare(&avctx->ch_layout, &ch_layouts[i]))
                 break;
         }
-        if (!c->ch_layouts[i].nb_channels) {
+        if (i == num_ch_layouts) {
             char buf[512];
             int ret = av_channel_layout_describe(&avctx->ch_layout, buf, sizeof(buf));
             av_log(avctx, AV_LOG_ERROR,
@@ -713,8 +727,8 @@ static int encode_preinit_audio(AVCodecContext *avctx)
                    ret > 0 ? buf : "?", c->name);
 
             av_log(avctx, AV_LOG_ERROR, "Supported channel layouts:\n");
-            for (int p = 0; c->ch_layouts[p].nb_channels; p++) {
-                ret = av_channel_layout_describe(&c->ch_layouts[p], buf, sizeof(buf));
+            for (int p = 0; ch_layouts[p].nb_channels; p++) {
+                ret = av_channel_layout_describe(&ch_layouts[p], buf, sizeof(buf));
                 av_log(avctx, AV_LOG_ERROR, "  %s\n", ret > 0 ? buf : "?");
             }
             return AVERROR(EINVAL);
@@ -737,6 +751,11 @@ int ff_encode_preinit(AVCodecContext *avctx)
 
     if (avctx->time_base.num <= 0 || avctx->time_base.den <= 0) {
         av_log(avctx, AV_LOG_ERROR, "The encoder timebase is not set.\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (avctx->bit_rate < 0) {
+        av_log(avctx, AV_LOG_ERROR, "The encoder bitrate is negative.\n");
         return AVERROR(EINVAL);
     }
 
@@ -819,24 +838,12 @@ int ff_encode_alloc_frame(AVCodecContext *avctx, AVFrame *frame)
 {
     int ret;
 
-    switch (avctx->codec->type) {
-    case AVMEDIA_TYPE_VIDEO:
-        frame->format = avctx->pix_fmt;
-        if (frame->width <= 0 || frame->height <= 0) {
-            frame->width  = FFMAX(avctx->width,  avctx->coded_width);
-            frame->height = FFMAX(avctx->height, avctx->coded_height);
-        }
+    av_assert1(avctx->codec_type == AVMEDIA_TYPE_VIDEO);
 
-        break;
-    case AVMEDIA_TYPE_AUDIO:
-        frame->sample_rate = avctx->sample_rate;
-        frame->format      = avctx->sample_fmt;
-        if (!frame->ch_layout.nb_channels) {
-            ret = av_channel_layout_copy(&frame->ch_layout, &avctx->ch_layout);
-            if (ret < 0)
-                return ret;
-        }
-        break;
+    frame->format = avctx->pix_fmt;
+    if (frame->width <= 0 || frame->height <= 0) {
+        frame->width  = avctx->width;
+        frame->height = avctx->height;
     }
 
     ret = avcodec_default_get_buffer2(avctx, frame, 0);
@@ -906,4 +913,48 @@ AVCPBProperties *ff_encode_add_cpb_side_data(AVCodecContext *avctx)
     avctx->coded_side_data[avctx->nb_coded_side_data - 1].size = size;
 
     return props;
+}
+
+int ff_encode_add_stats_side_data(AVPacket *pkt, int quality, const int64_t error[],
+                                  int error_count, enum AVPictureType pict_type)
+{
+    uint8_t *side_data;
+    size_t side_data_size;
+
+    side_data = av_packet_get_side_data(pkt, AV_PKT_DATA_QUALITY_STATS, &side_data_size);
+    if (!side_data) {
+        side_data_size = 4+4+8*error_count;
+        side_data = av_packet_new_side_data(pkt, AV_PKT_DATA_QUALITY_STATS,
+                                            side_data_size);
+    }
+
+    if (!side_data || side_data_size < 4+4+8*error_count)
+        return AVERROR(ENOMEM);
+
+    AV_WL32(side_data, quality);
+    side_data[4] = pict_type;
+    side_data[5] = error_count;
+    for (int i = 0; i < error_count; ++i)
+        AV_WL64(side_data+8 + 8*i , error[i]);
+
+    return 0;
+}
+
+int ff_check_codec_matrices(AVCodecContext *avctx, unsigned types, uint16_t min, uint16_t max)
+{
+    uint16_t  *matrices[] = {avctx->intra_matrix, avctx->inter_matrix, avctx->chroma_intra_matrix};
+    const char   *names[] = {"Intra", "Inter", "Chroma Intra"};
+    static_assert(FF_ARRAY_ELEMS(matrices) == FF_ARRAY_ELEMS(names), "matrix count mismatch");
+    for (int m = 0; m < FF_ARRAY_ELEMS(matrices); m++) {
+        uint16_t *matrix = matrices[m];
+        if (matrix && (types & (1U << m))) {
+            for (int i = 0; i < 64; i++) {
+                if (matrix[i] < min || matrix[i] > max) {
+                    av_log(avctx, AV_LOG_ERROR, "%s matrix[%d] is %d which is out of the allowed range [%"PRIu16"-%"PRIu16"].\n", names[m], i, matrix[i], min, max);
+                    return AVERROR(EINVAL);
+                }
+            }
+        }
+    }
+    return 0;
 }

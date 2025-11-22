@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Institue of Software Chinese Academy of Sciences (ISCAS).
+ * Copyright (c) 2024 Institute of Software Chinese Academy of Sciences (ISCAS).
  *
  * This file is part of FFmpeg.
  *
@@ -22,6 +22,7 @@
 
 #if __riscv_xlen >= 64
 func ff_copy64_rvi
+        lpad    0
 1:
         addi          a4, a4, -1
         ld            t0, (a2)
@@ -48,6 +49,7 @@ func ff_copy64_rvi
 endfunc
 
 func ff_copy32_rvi
+        lpad    0
 1:
         addi          a4, a4, -1
         ld            t0, (a2)
@@ -66,6 +68,7 @@ func ff_copy32_rvi
 endfunc
 
 func ff_copy16_rvi
+        lpad    0
 1:
         addi          a4, a4, -1
         ld            t0, (a2)
@@ -80,6 +83,7 @@ func ff_copy16_rvi
 endfunc
 
 func ff_copy8_rvi
+        lpad    0
 1:
         addi          a4, a4, -1
         ld            t0, (a2)
@@ -93,6 +97,7 @@ endfunc
 #endif
 
 func ff_copy4_rvi
+        lpad    0
 1:
         addi          a4, a4, -1
         lw            t0, (a2)

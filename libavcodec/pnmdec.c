@@ -22,6 +22,7 @@
 #include "config_components.h"
 
 #include "libavutil/half2float.h"
+#include "libavutil/intfloat.h"
 
 #include "avcodec.h"
 #include "codec_internal.h"
@@ -262,7 +263,7 @@ static int pnm_decode_frame(AVCodecContext *avctx, AVFrame *p,
         break;
     case AV_PIX_FMT_GBRPF32:
         if (!s->half) {
-            if (avctx->width * avctx->height * 12 > s->bytestream_end - s->bytestream)
+            if (avctx->width * avctx->height * 12LL > s->bytestream_end - s->bytestream)
                 return AVERROR_INVALIDDATA;
             scale = 1.f / s->scale;
             if (s->endian) {

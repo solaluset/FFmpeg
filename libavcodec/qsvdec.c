@@ -51,7 +51,7 @@
 #include "hwconfig.h"
 #include "qsv.h"
 #include "qsv_internal.h"
-#include "refstruct.h"
+#include "libavutil/refstruct.h"
 
 #if QSV_ONEVPL
 #include <mfxdispatcher.h>
@@ -696,7 +696,7 @@ static int qsv_export_hdr_side_data(AVCodecContext *avctx, mfxExtMasteringDispla
 {
     int ret;
 
-    // The SDK re-uses this flag for HDR SEI parsing
+    // The SDK reuses this flag for HDR SEI parsing
     if (mdcv->InsertPayloadToggle) {
         AVMasteringDisplayMetadata *mastering;
         const int mapping[3] = {2, 0, 1};
@@ -726,7 +726,7 @@ static int qsv_export_hdr_side_data(AVCodecContext *avctx, mfxExtMasteringDispla
         }
     }
 
-    // The SDK re-uses this flag for HDR SEI parsing
+    // The SDK reuses this flag for HDR SEI parsing
     if (clli->InsertPayloadToggle) {
         AVContentLightMetadata *light;
 
@@ -933,7 +933,8 @@ static int qsv_decode(AVCodecContext *avctx, QSVContext *q,
         frame->pict_type = ff_qsv_map_pictype(aframe.frame->dec_info.FrameType);
 
         if (avctx->codec_id == AV_CODEC_ID_H264 ||
-            avctx->codec_id == AV_CODEC_ID_HEVC) {
+            avctx->codec_id == AV_CODEC_ID_HEVC ||
+            avctx->codec_id == AV_CODEC_ID_VVC) {
             if (aframe.frame->dec_info.FrameType & MFX_FRAMETYPE_IDR)
                 frame->flags |= AV_FRAME_FLAG_KEY;
             else
@@ -983,7 +984,7 @@ static void qsv_decode_close_qsvcontext(QSVContext *q)
     ff_qsv_close_internal_session(&q->internal_qs);
 
     av_buffer_unref(&q->frames_ctx.hw_frames_ctx);
-    ff_refstruct_unref(&q->frames_ctx.mids);
+    av_refstruct_unref(&q->frames_ctx.mids);
     av_buffer_pool_uninit(&q->pool);
 }
 
@@ -1001,7 +1002,7 @@ static int qsv_process_data(AVCodecContext *avctx, QSVContext *q,
 
     // sw_pix_fmt, coded_width/height should be set for ff_get_format(),
     // assume sw_pix_fmt is NV12 and coded_width/height to be 1280x720,
-    // the assumption may be not corret but will be updated after header decoded if not true.
+    // the assumption may be not correct but will be updated after header decoded if not true.
     if (q->orig_pix_fmt != AV_PIX_FMT_NONE)
         pix_fmt = q->orig_pix_fmt;
     if (!avctx->coded_width)
@@ -1299,4 +1300,8 @@ DEFINE_QSV_DECODER(vp9, VP9, NULL)
 
 #if CONFIG_AV1_QSV_DECODER
 DEFINE_QSV_DECODER(av1, AV1, NULL)
+#endif
+
+#if CONFIG_VVC_QSV_DECODER
+DEFINE_QSV_DECODER(vvc, VVC, "vvc_mp4toannexb")
 #endif

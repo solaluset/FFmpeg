@@ -81,6 +81,7 @@
 #include "ffmpeg.h"
 #include "ffmpeg_sched.h"
 #include "ffmpeg_utils.h"
+#include "graph/graphprint.h"
 
 const char program_name[] = "ffmpeg";
 const int program_birth_year = 2000;
@@ -249,7 +250,7 @@ void term_init(void)
 /* read a key without blocking */
 static int read_key(void)
 {
-    unsigned char ch;
+    unsigned char ch = -1;
 #if HAVE_TERMIOS_H
     int n = 1;
     struct timeval tv;
@@ -296,7 +297,7 @@ static int read_key(void)
     if(kbhit())
         return(getch());
 #endif
-    return -1;
+    return ch;
 }
 
 static int decode_interrupt_cb(void *ctx)
@@ -308,9 +309,12 @@ const AVIOInterruptCB int_cb = { decode_interrupt_cb, NULL };
 
 static void ffmpeg_cleanup(int ret)
 {
+    if ((print_graphs || print_graphs_file) && nb_output_files > 0)
+        print_filtergraphs(filtergraphs, nb_filtergraphs, input_files, nb_input_files, output_files, nb_output_files);
+
     if (do_benchmark) {
-        int maxrss = getmaxrss() / 1024;
-        av_log(NULL, AV_LOG_INFO, "bench: maxrss=%iKiB\n", maxrss);
+        int64_t maxrss = getmaxrss() / 1024;
+        av_log(NULL, AV_LOG_INFO, "bench: maxrss=%"PRId64"KiB\n", maxrss);
     }
 
     for (int i = 0; i < nb_filtergraphs; i++)
@@ -339,6 +343,9 @@ static void ffmpeg_cleanup(int ret)
     hw_device_free_all();
 
     av_freep(&filter_nbthreads);
+
+    av_freep(&print_graphs_file);
+    av_freep(&print_graphs_format);
 
     av_freep(&input_files);
     av_freep(&output_files);
@@ -393,6 +400,7 @@ static void frame_data_free(void *opaque, uint8_t *data)
 {
     FrameData *fd = (FrameData *)data;
 
+    av_frame_side_data_free(&fd->side_data, &fd->nb_side_data);
     avcodec_parameters_free(&fd->par_enc);
 
     av_free(data);
@@ -422,6 +430,8 @@ static int frame_data_ensure(AVBufferRef **dst, int writable)
 
             memcpy(fd, fd_src, sizeof(*fd));
             fd->par_enc = NULL;
+            fd->side_data = NULL;
+            fd->nb_side_data = 0;
 
             if (fd_src->par_enc) {
                 int ret = 0;
@@ -430,6 +440,16 @@ static int frame_data_ensure(AVBufferRef **dst, int writable)
                 ret = fd->par_enc ?
                       avcodec_parameters_copy(fd->par_enc, fd_src->par_enc) :
                       AVERROR(ENOMEM);
+                if (ret < 0) {
+                    av_buffer_unref(dst);
+                    av_buffer_unref(&src);
+                    return ret;
+                }
+            }
+
+            if (fd_src->nb_side_data) {
+                int ret = clone_side_data(&fd->side_data, &fd->nb_side_data,
+                                          fd_src->side_data, fd_src->nb_side_data, 0);
                 if (ret < 0) {
                     av_buffer_unref(dst);
                     av_buffer_unref(&src);
@@ -555,7 +575,7 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
     static int64_t last_time = -1;
     static int first_report = 1;
     uint64_t nb_frames_dup = 0, nb_frames_drop = 0;
-    int mins, secs, us;
+    int mins, secs, ms, us;
     int64_t hours;
     const char *hours_sign;
     int ret;
@@ -579,6 +599,7 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
     vid = 0;
     av_bprint_init(&buf, 0, AV_BPRINT_SIZE_AUTOMATIC);
     av_bprint_init(&buf_script, 0, AV_BPRINT_SIZE_AUTOMATIC);
+
     for (OutputStream *ost = ost_iter(NULL); ost; ost = ost_iter(ost)) {
         const float q = ost->enc ? atomic_load(&ost->quality) / (float) FF_QP2LAMBDA : -1;
 
@@ -587,7 +608,7 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
             av_bprintf(&buf_script, "stream_%d_%d_q=%.1f\n",
                        ost->file->index, ost->index, q);
         }
-        if (!vid && ost->type == AVMEDIA_TYPE_VIDEO && ost->filter) {
+        if (!vid && ost->type == AVMEDIA_TYPE_VIDEO) {
             float fps;
             uint64_t frame_number = atomic_load(&ost->packets_written);
 
@@ -601,8 +622,10 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
             if (is_last_report)
                 av_bprintf(&buf, "L");
 
-            nb_frames_dup  = atomic_load(&ost->filter->nb_frames_dup);
-            nb_frames_drop = atomic_load(&ost->filter->nb_frames_drop);
+            if (ost->filter) {
+                nb_frames_dup  = atomic_load(&ost->filter->nb_frames_dup);
+                nb_frames_drop = atomic_load(&ost->filter->nb_frames_drop);
+            }
 
             vid = 1;
         }
@@ -667,6 +690,15 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
         av_bprintf(&buf_script, "speed=%4.3gx\n", speed);
     }
 
+    secs = (int)t;
+    ms = (int)((t - secs) * 1000);
+    mins = secs / 60;
+    secs %= 60;
+    hours = mins / 60;
+    mins %= 60;
+
+    av_bprintf(&buf, " elapsed=%"PRId64":%02d:%02d.%02d", hours, mins, secs, ms / 10);
+
     if (print_stats || is_last_report) {
         const char end = is_last_report ? '\n' : '\r';
         if (print_stats==1 && AV_LOG_INFO > av_log_get_level()) {
@@ -726,7 +758,7 @@ static void print_stream_maps(void)
                 av_log(NULL, AV_LOG_INFO, " (graph %d)", ost->filter->graph->index);
 
             av_log(NULL, AV_LOG_INFO, " -> Stream #%d:%d (%s)\n", ost->file->index,
-                   ost->index, ost->enc_ctx->codec->name);
+                   ost->index, ost->enc->enc_ctx->codec->name);
             continue;
         }
 
@@ -735,9 +767,9 @@ static void print_stream_maps(void)
                ost->ist->index,
                ost->file->index,
                ost->index);
-        if (ost->enc_ctx) {
+        if (ost->enc) {
             const AVCodec *in_codec    = ost->ist->dec;
-            const AVCodec *out_codec   = ost->enc_ctx->codec;
+            const AVCodec *out_codec   = ost->enc->enc_ctx->codec;
             const char *decoder_name   = "?";
             const char *in_codec_name  = "?";
             const char *encoder_name   = "?";
@@ -787,8 +819,6 @@ static int check_keyboard_interaction(int64_t cur_time)
 {
     int i, key;
     static int64_t last_time;
-    if (received_nb_signals)
-        return AVERROR_EXIT;
     /* read_key() returns 0 on EOF */
     if (cur_time - last_time >= 100000) {
         key =  read_key();
@@ -871,6 +901,9 @@ static int transcode(Scheduler *sch)
 
     while (!sch_wait(sch, stats_period, &transcode_ts)) {
         int64_t cur_time= av_gettime_relative();
+
+        if (received_nb_signals)
+            break;
 
         /* if 'q' pressed, exits */
         if (stdin_interaction)
@@ -1009,6 +1042,9 @@ finish:
     ffmpeg_cleanup(ret);
 
     sch_free(&sch);
+
+    av_log(NULL, AV_LOG_VERBOSE, "\n");
+    av_log(NULL, AV_LOG_VERBOSE, "Exiting with exit code %d\n", ret);
 
     return ret;
 }

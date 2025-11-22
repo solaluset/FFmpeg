@@ -1,6 +1,6 @@
 /*
  * AAC encoder assembly optimizations
- * Copyright (c) 2023 Institue of Software Chinese Academy of Sciences (ISCAS).
+ * Copyright (c) 2023 Institute of Software Chinese Academy of Sciences (ISCAS).
  *
  * This file is part of FFmpeg.
  *
@@ -35,7 +35,7 @@ av_cold void ff_aacenc_dsp_init_riscv(AACEncDSPContext *s)
     int flags = av_get_cpu_flags();
 
     if (flags & AV_CPU_FLAG_RVV_F32) {
-        if (flags & AV_CPU_FLAG_RVB_ADDR) {
+        if (flags & AV_CPU_FLAG_RVB) {
             s->abs_pow34 = ff_abs_pow34_rvv;
             s->quant_bands = ff_aac_quant_bands_rvv;
         }

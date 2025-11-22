@@ -26,7 +26,6 @@
 #include "audio.h"
 #include "avfilter.h"
 #include "filters.h"
-#include "internal.h"
 
 #define NBANDS 17
 #define M 15
@@ -351,11 +350,11 @@ static const AVOption superequalizer_options[] = {
 
 AVFILTER_DEFINE_CLASS(superequalizer);
 
-const AVFilter ff_af_superequalizer = {
-    .name          = "superequalizer",
-    .description   = NULL_IF_CONFIG_SMALL("Apply 18 band equalization filter."),
+const FFFilter ff_af_superequalizer = {
+    .p.name        = "superequalizer",
+    .p.description = NULL_IF_CONFIG_SMALL("Apply 18 band equalization filter."),
+    .p.priv_class  = &superequalizer_class,
     .priv_size     = sizeof(SuperEqualizerContext),
-    .priv_class    = &superequalizer_class,
     .init          = init,
     .activate      = activate,
     .uninit        = uninit,

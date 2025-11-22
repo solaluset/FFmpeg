@@ -63,8 +63,6 @@ typedef struct VAAPIEncodeSlice {
 } VAAPIEncodeSlice;
 
 typedef struct VAAPIEncodePicture {
-    FFHWBaseEncodePicture base;
-
 #if VA_CHECK_VERSION(1, 0, 0)
     // ROI regions.
     VAEncROI       *roi;
@@ -204,7 +202,7 @@ typedef struct VAAPIEncodeContext {
     AVVAAPIDeviceContext *hwctx;
 
     // Pool of (reusable) bitstream output buffers.
-    struct FFRefStructPool *output_buffer_pool;
+    struct AVRefStructPool *output_buffer_pool;
 
     // Global parameters which will be applied at the start of the
     // sequence (includes rate control parameters below).
@@ -262,6 +260,10 @@ typedef struct VAAPIEncodeContext {
      * This is a RefStruct reference.
      */
     VABufferID     *coded_buffer_ref;
+
+    // Surface alignment required by driver.
+    int             surface_alignment_width;
+    int             surface_alignment_height;
 } VAAPIEncodeContext;
 
 typedef struct VAAPIEncodeType {
@@ -301,9 +303,9 @@ typedef struct VAAPIEncodeType {
     // Fill the parameter structures.
     int  (*init_sequence_params)(AVCodecContext *avctx);
     int   (*init_picture_params)(AVCodecContext *avctx,
-                                 VAAPIEncodePicture *pic);
+                                 FFHWBaseEncodePicture *pic);
     int     (*init_slice_params)(AVCodecContext *avctx,
-                                 VAAPIEncodePicture *pic,
+                                 FFHWBaseEncodePicture *pic,
                                  VAAPIEncodeSlice *slice);
 
     // The type used by the packed header: this should look like
@@ -318,7 +320,7 @@ typedef struct VAAPIEncodeType {
     int (*write_sequence_header)(AVCodecContext *avctx,
                                  char *data, size_t *data_len);
     int  (*write_picture_header)(AVCodecContext *avctx,
-                                 VAAPIEncodePicture *pic,
+                                 FFHWBaseEncodePicture *pic,
                                  char *data, size_t *data_len);
     int    (*write_slice_header)(AVCodecContext *avctx,
                                  VAAPIEncodePicture *pic,
@@ -330,7 +332,7 @@ typedef struct VAAPIEncodeType {
     // with increasing index argument until AVERROR_EOF is
     // returned.
     int    (*write_extra_buffer)(AVCodecContext *avctx,
-                                 VAAPIEncodePicture *pic,
+                                 FFHWBaseEncodePicture *pic,
                                  int index, int *type,
                                  char *data, size_t *data_len);
 
@@ -338,7 +340,7 @@ typedef struct VAAPIEncodeType {
     // with increasing index argument until AVERROR_EOF is
     // returned.
     int    (*write_extra_header)(AVCodecContext *avctx,
-                                 VAAPIEncodePicture *pic,
+                                 FFHWBaseEncodePicture *pic,
                                  int index, int *type,
                                  char *data, size_t *data_len);
 } VAAPIEncodeType;
@@ -358,7 +360,7 @@ int ff_vaapi_encode_close(AVCodecContext *avctx);
     { "max_frame_size", \
       "Maximum frame size (in bytes)",\
       OFFSET(common.max_frame_size), AV_OPT_TYPE_INT, \
-      { .i64 = 0 }, 0, INT_MAX, FLAGS }
+      { .i64 = 0 }, 0, INT_MAX / 8, FLAGS }
 
 #define VAAPI_ENCODE_RC_MODE(name, desc) \
     { #name, desc, 0, AV_OPT_TYPE_CONST, { .i64 = RC_MODE_ ## name }, \

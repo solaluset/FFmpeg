@@ -279,7 +279,7 @@ static int extract_header(AVCodecContext *const avctx,
         if (avctx->codec_tag == MKTAG('P', 'B', 'M', ' ') && s->ham == 4)
             extra_space = 4;
 
-        s->ham_buf = av_malloc((s->planesize * 8) + AV_INPUT_BUFFER_PADDING_SIZE);
+        s->ham_buf = av_mallocz((s->planesize * 8) + AV_INPUT_BUFFER_PADDING_SIZE);
         if (!s->ham_buf)
             return AVERROR(ENOMEM);
 
@@ -523,7 +523,7 @@ static int decode_byterun2(uint8_t *dst, int height, int line_size,
                            GetByteContext *gb)
 {
     GetByteContext cmds;
-    unsigned count;
+    int count;
     int i, y_pos = 0, x_pos = 0;
 
     if (bytestream2_get_be32(gb) != MKBETAG('V', 'D', 'A', 'T'))
@@ -531,7 +531,7 @@ static int decode_byterun2(uint8_t *dst, int height, int line_size,
 
     bytestream2_skip(gb, 4);
     count = bytestream2_get_be16(gb) - 2;
-    if (bytestream2_get_bytes_left(gb) < count)
+    if (count < 0 || bytestream2_get_bytes_left(gb) < count)
         return 0;
 
     bytestream2_init(&cmds, gb->buffer, count);

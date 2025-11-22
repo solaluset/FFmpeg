@@ -36,22 +36,22 @@
 static int opus_decoder_config(IAMFCodecConfig *codec_config,
                                AVIOContext *pb, int len)
 {
-    int left = len - avio_tell(pb);
+    int ret, left = len - avio_tell(pb);
 
-    if (left < 11)
+    if (left < 11 || codec_config->audio_roll_distance >= 0)
         return AVERROR_INVALIDDATA;
 
     codec_config->extradata = av_malloc(left + 8);
     if (!codec_config->extradata)
         return AVERROR(ENOMEM);
 
-    AV_WB32(codec_config->extradata, MKBETAG('O','p','u','s'));
-    AV_WB32(codec_config->extradata + 4, MKBETAG('H','e','a','d'));
-    codec_config->extradata_size = avio_read(pb, codec_config->extradata + 8, left);
-    if (codec_config->extradata_size < left)
-        return AVERROR_INVALIDDATA;
+    AV_WB32A(codec_config->extradata,     MKBETAG('O','p','u','s'));
+    AV_WB32A(codec_config->extradata + 4, MKBETAG('H','e','a','d'));
+    ret = ffio_read_size(pb, codec_config->extradata + 8, left);
+    if (ret < 0)
+        return ret;
 
-    codec_config->extradata_size += 8;
+    codec_config->extradata_size = left + 8;
     codec_config->sample_rate = 48000;
 
     return 0;
@@ -64,7 +64,10 @@ static int aac_decoder_config(IAMFCodecConfig *codec_config,
     int object_type_id, codec_id, stream_type;
     int ret, tag, left;
 
-    tag = avio_r8(pb);
+    if (codec_config->audio_roll_distance >= 0)
+        return AVERROR_INVALIDDATA;
+
+    ff_mp4_read_descr(logctx, pb, &tag);
     if (tag != MP4DecConfigDescrTag)
         return AVERROR_INVALIDDATA;
 
@@ -84,12 +87,9 @@ static int aac_decoder_config(IAMFCodecConfig *codec_config,
     if (codec_id && codec_id != codec_config->codec_id)
         return AVERROR_INVALIDDATA;
 
-    tag = avio_r8(pb);
-    if (tag != MP4DecSpecificDescrTag)
-        return AVERROR_INVALIDDATA;
-
-    left = len - avio_tell(pb);
-    if (left <= 0)
+    left = ff_mp4_read_descr(logctx, pb, &tag);
+    if (tag != MP4DecSpecificDescrTag ||
+        !left || left > (len - avio_tell(pb)))
         return AVERROR_INVALIDDATA;
 
     // We pad extradata here because avpriv_mpeg4audio_get_config2() needs it.
@@ -97,9 +97,10 @@ static int aac_decoder_config(IAMFCodecConfig *codec_config,
     if (!codec_config->extradata)
         return AVERROR(ENOMEM);
 
-    codec_config->extradata_size = avio_read(pb, codec_config->extradata, left);
-    if (codec_config->extradata_size < left)
-        return AVERROR_INVALIDDATA;
+    ret = ffio_read_size(pb, codec_config->extradata, left);
+    if (ret < 0)
+        return ret;
+    codec_config->extradata_size = left;
     memset(codec_config->extradata + codec_config->extradata_size, 0,
            AV_INPUT_BUFFER_PADDING_SIZE);
 
@@ -116,7 +117,10 @@ static int aac_decoder_config(IAMFCodecConfig *codec_config,
 static int flac_decoder_config(IAMFCodecConfig *codec_config,
                                AVIOContext *pb, int len)
 {
-    int left;
+    int ret, left;
+
+    if (codec_config->audio_roll_distance)
+        return AVERROR_INVALIDDATA;
 
     avio_skip(pb, 4); // METADATA_BLOCK_HEADER
 
@@ -128,10 +132,11 @@ static int flac_decoder_config(IAMFCodecConfig *codec_config,
     if (!codec_config->extradata)
         return AVERROR(ENOMEM);
 
-    codec_config->extradata_size = avio_read(pb, codec_config->extradata, left);
-    if (codec_config->extradata_size < left)
-        return AVERROR_INVALIDDATA;
+    ret = ffio_read_size(pb, codec_config->extradata, left);
+    if (ret < 0)
+        return ret;
 
+    codec_config->extradata_size = left;
     codec_config->sample_rate = AV_RB24(codec_config->extradata + 10) >> 4;
 
     return 0;
@@ -146,7 +151,7 @@ static int ipcm_decoder_config(IAMFCodecConfig *codec_config,
     };
     int sample_format = avio_r8(pb); // 0 = BE, 1 = LE
     int sample_size = (avio_r8(pb) / 8 - 2); // 16, 24, 32
-    if (sample_format > 1 || sample_size > 2)
+    if (sample_format > 1 || sample_size > 2U || codec_config->audio_roll_distance)
         return AVERROR_INVALIDDATA;
 
     codec_config->codec_id = sample_fmt[sample_format][sample_size];
@@ -166,19 +171,16 @@ static int codec_config_obu(void *s, IAMFContext *c, AVIOContext *pb, int len)
     uint8_t *buf;
     enum AVCodecID avcodec_id;
     unsigned codec_config_id, nb_samples, codec_id;
-    int16_t seek_preroll;
+    int16_t audio_roll_distance;
     int ret;
 
     buf = av_malloc(len);
     if (!buf)
         return AVERROR(ENOMEM);
 
-    ret = avio_read(pb, buf, len);
-    if (ret != len) {
-        if (ret >= 0)
-            ret = AVERROR_INVALIDDATA;
+    ret = ffio_read_size(pb, buf, len);
+    if (ret < 0)
         goto fail;
-    }
 
     ffio_init_context(&b, buf, len, 0, NULL, NULL, NULL, NULL);
     pbc = &b.pub;
@@ -186,7 +188,7 @@ static int codec_config_obu(void *s, IAMFContext *c, AVIOContext *pb, int len)
     codec_config_id = ffio_read_leb(pbc);
     codec_id = avio_rb32(pbc);
     nb_samples = ffio_read_leb(pbc);
-    seek_preroll = avio_rb16(pbc);
+    audio_roll_distance = avio_rb16(pbc);
 
     switch(codec_id) {
     case MKBETAG('O','p','u','s'):
@@ -225,7 +227,7 @@ static int codec_config_obu(void *s, IAMFContext *c, AVIOContext *pb, int len)
     codec_config->codec_config_id = codec_config_id;
     codec_config->codec_id = avcodec_id;
     codec_config->nb_samples = nb_samples;
-    codec_config->seek_preroll = seek_preroll;
+    codec_config->audio_roll_distance = audio_roll_distance;
 
     switch(codec_id) {
     case MKBETAG('O','p','u','s'):
@@ -245,6 +247,12 @@ static int codec_config_obu(void *s, IAMFContext *c, AVIOContext *pb, int len)
     }
     if (ret < 0)
         goto fail;
+
+    if ((codec_config->nb_samples > INT_MAX) || codec_config->nb_samples <= 0 ||
+        (-codec_config->audio_roll_distance > INT_MAX / codec_config->nb_samples)) {
+        ret = AVERROR_INVALIDDATA;
+        goto fail;
+    }
 
     c->codec_configs[c->nb_codec_configs++] = codec_config;
 
@@ -271,13 +279,17 @@ static int update_extradata(AVCodecParameters *codecpar)
 
     switch(codecpar->codec_id) {
     case AV_CODEC_ID_OPUS:
-        AV_WB8(codecpar->extradata + 9, codecpar->ch_layout.nb_channels);
+        AV_WB8(codecpar->extradata   + 9,  codecpar->ch_layout.nb_channels);
+        AV_WL16A(codecpar->extradata + 10, AV_RB16A(codecpar->extradata + 10)); // Byte swap pre-skip
+        AV_WL32A(codecpar->extradata + 12, AV_RB32A(codecpar->extradata + 12)); // Byte swap sample rate
+        AV_WL16A(codecpar->extradata + 16, AV_RB16A(codecpar->extradata + 16)); // Byte swap Output Gain
         break;
     case AV_CODEC_ID_AAC: {
-        uint8_t buf[5];
+        uint8_t buf[6];
+        int size = FFMIN(codecpar->extradata_size, sizeof(buf));
 
         init_put_bits(&pb, buf, sizeof(buf));
-        ret = init_get_bits8(&gb, codecpar->extradata, codecpar->extradata_size);
+        ret = init_get_bits8(&gb, codecpar->extradata, size);
         if (ret < 0)
             return ret;
 
@@ -292,31 +304,42 @@ static int update_extradata(AVCodecParameters *codecpar)
 
         skip_bits(&gb, 4);
         put_bits(&pb, 4, codecpar->ch_layout.nb_channels); // set channel config
-        ret = put_bits_left(&pb);
-        put_bits(&pb, ret, get_bits(&gb, ret));
+        ret = get_bits_left(&gb);
+        if (ret < 0)
+            return AVERROR_INVALIDDATA;
+        ret = FFMIN(ret, put_bits_left(&pb));
+        while (ret >= 32) {
+           put_bits32(&pb, get_bits_long(&gb, 32));
+           ret -= 32;
+        }
+        put_bits(&pb, ret, get_bits_long(&gb, ret));
         flush_put_bits(&pb);
 
-        memcpy(codecpar->extradata, buf, sizeof(buf));
+        memcpy(codecpar->extradata, buf, put_bytes_output(&pb));
         break;
     }
     case AV_CODEC_ID_FLAC: {
         uint8_t buf[13];
+        int size = FFMIN(codecpar->extradata_size, sizeof(buf));
 
         init_put_bits(&pb, buf, sizeof(buf));
-        ret = init_get_bits8(&gb, codecpar->extradata, codecpar->extradata_size);
+        ret = init_get_bits8(&gb, codecpar->extradata, size);
         if (ret < 0)
             return ret;
 
         put_bits32(&pb, get_bits_long(&gb, 32)); // min/max blocksize
-        put_bits64(&pb, 48, get_bits64(&gb, 48)); // min/max framesize
+        put_bits63(&pb, 48, get_bits64(&gb, 48)); // min/max framesize
         put_bits(&pb, 20, get_bits(&gb, 20)); // samplerate
         skip_bits(&gb, 3);
         put_bits(&pb, 3, codecpar->ch_layout.nb_channels - 1);
-        ret = put_bits_left(&pb);
+        ret = get_bits_left(&gb);
+        if (ret < 0)
+            return AVERROR_INVALIDDATA;
+        ret = FFMIN(ret, put_bits_left(&pb));
         put_bits(&pb, ret, get_bits(&gb, ret));
         flush_put_bits(&pb);
 
-        memcpy(codecpar->extradata, buf, sizeof(buf));
+        memcpy(codecpar->extradata, buf, put_bytes_output(&pb));
         break;
     }
     }
@@ -341,10 +364,12 @@ static int scalable_channel_layout_config(void *s, AVIOContext *pb,
         return AVERROR(ENOMEM);
 
     audio_element->nb_layers = nb_layers;
-    for (int i = 0; i < nb_layers; i++) {
+    for (int i = 0, n = 0; i < nb_layers; i++) {
+        AVChannelLayout ch_layout = { 0 };
         AVIAMFLayer *layer;
         int loudspeaker_layout, output_gain_is_present_flag;
         int substream_count, coupled_substream_count;
+        int expanded_loudspeaker_layout = -1;
         int ret, byte = avio_r8(pb);
 
         layer = av_iamf_audio_element_add_layer(audio_element->element);
@@ -368,10 +393,16 @@ static int scalable_channel_layout_config(void *s, AVIOContext *pb,
             layer->output_gain = av_make_q(sign_extend(avio_rb16(pb), 16), 1 << 8);
         }
 
-        if (loudspeaker_layout < 10)
-            av_channel_layout_copy(&layer->ch_layout, &ff_iamf_scalable_ch_layouts[loudspeaker_layout]);
-        else
-            layer->ch_layout = (AVChannelLayout){ .order = AV_CHANNEL_ORDER_UNSPEC,
+        if (!i && loudspeaker_layout == 15)
+            expanded_loudspeaker_layout = avio_r8(pb);
+        if (expanded_loudspeaker_layout > 0 && expanded_loudspeaker_layout < 13) {
+            av_channel_layout_copy(&ch_layout, &ff_iamf_expanded_scalable_ch_layouts[expanded_loudspeaker_layout]);
+        } else if (loudspeaker_layout < 10) {
+            av_channel_layout_copy(&ch_layout, &ff_iamf_scalable_ch_layouts[loudspeaker_layout]);
+            if (i)
+                ch_layout.u.mask &= ~av_channel_layout_subset(&audio_element->element->layers[i-1]->ch_layout, UINT64_MAX);
+        } else
+            ch_layout = (AVChannelLayout){ .order = AV_CHANNEL_ORDER_UNSPEC,
                                                           .nb_channels = substream_count +
                                                                          coupled_substream_count };
 
@@ -386,6 +417,64 @@ static int scalable_channel_layout_config(void *s, AVIOContext *pb,
                 return ret;
         }
 
+        if (ch_layout.order == AV_CHANNEL_ORDER_NATIVE) {
+            ret = av_channel_layout_custom_init(&layer->ch_layout, ch_layout.nb_channels);
+            if (ret < 0)
+                return ret;
+
+            for (int j = 0; j < n; j++)
+                layer->ch_layout.u.map[j].id = av_channel_layout_channel_from_index(&audio_element->element->layers[i-1]->ch_layout, j);
+
+            coupled_substream_count = audio_element->layers[i].coupled_substream_count;
+            while (coupled_substream_count--) {
+                if (ch_layout.u.mask & AV_CH_LAYOUT_STEREO) {
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_FRONT_LEFT;
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_FRONT_RIGHT;
+                    ch_layout.u.mask &= ~AV_CH_LAYOUT_STEREO;
+                } else if (ch_layout.u.mask & (AV_CH_FRONT_LEFT_OF_CENTER|AV_CH_FRONT_RIGHT_OF_CENTER)) {
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_FRONT_LEFT_OF_CENTER;
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_FRONT_RIGHT_OF_CENTER;
+                    ch_layout.u.mask &= ~(AV_CH_FRONT_LEFT_OF_CENTER|AV_CH_FRONT_RIGHT_OF_CENTER);
+                } else if (ch_layout.u.mask & (AV_CH_SIDE_LEFT|AV_CH_SIDE_RIGHT)) {
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_SIDE_LEFT;
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_SIDE_RIGHT;
+                    ch_layout.u.mask &= ~(AV_CH_SIDE_LEFT|AV_CH_SIDE_RIGHT);
+                } else if (ch_layout.u.mask & (AV_CH_BACK_LEFT|AV_CH_BACK_RIGHT)) {
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_BACK_LEFT;
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_BACK_RIGHT;
+                    ch_layout.u.mask &= ~(AV_CH_BACK_LEFT|AV_CH_BACK_RIGHT);
+                } else if (ch_layout.u.mask & (AV_CH_TOP_FRONT_LEFT|AV_CH_TOP_FRONT_RIGHT)) {
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_TOP_FRONT_LEFT;
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_TOP_FRONT_RIGHT;
+                    ch_layout.u.mask &= ~(AV_CH_TOP_FRONT_LEFT|AV_CH_TOP_FRONT_RIGHT);
+                } else if (ch_layout.u.mask & (AV_CH_TOP_SIDE_LEFT|AV_CH_TOP_SIDE_RIGHT)) {
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_TOP_SIDE_LEFT;
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_TOP_SIDE_RIGHT;
+                    ch_layout.u.mask &= ~(AV_CH_TOP_SIDE_LEFT|AV_CH_TOP_SIDE_RIGHT);
+                } else if (ch_layout.u.mask & (AV_CH_TOP_BACK_LEFT|AV_CH_TOP_BACK_RIGHT)) {
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_TOP_BACK_LEFT;
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_TOP_BACK_RIGHT;
+                    ch_layout.u.mask &= ~(AV_CH_TOP_BACK_LEFT|AV_CH_TOP_BACK_RIGHT);
+                }
+            }
+
+            substream_count -= audio_element->layers[i].coupled_substream_count;
+            while (substream_count--) {
+                if (ch_layout.u.mask & AV_CH_FRONT_CENTER) {
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_FRONT_CENTER;
+                    ch_layout.u.mask &= ~AV_CH_FRONT_CENTER;
+                }
+                if (ch_layout.u.mask & AV_CH_LOW_FREQUENCY) {
+                    layer->ch_layout.u.map[n++].id = AV_CHAN_LOW_FREQUENCY;
+                    ch_layout.u.mask &= ~AV_CH_LOW_FREQUENCY;
+                }
+            }
+
+            ret = av_channel_layout_retype(&layer->ch_layout, AV_CHANNEL_ORDER_NATIVE, 0);
+            if (ret < 0 && ret != AVERROR(ENOSYS))
+                return ret;
+        } else // AV_CHANNEL_ORDER_UNSPEC
+            av_channel_layout_copy(&layer->ch_layout, &ch_layout);
     }
 
     return 0;
@@ -402,11 +491,11 @@ static int ambisonics_config(void *s, AVIOContext *pb,
 
     ambisonics_mode = ffio_read_leb(pb);
     if (ambisonics_mode > 1)
-        return 0;
+        return AVERROR_INVALIDDATA;
 
     output_channel_count = avio_r8(pb);  // C
     substream_count = avio_r8(pb);  // N
-    if (audio_element->nb_substreams != substream_count)
+    if (audio_element->nb_substreams != substream_count || output_channel_count == 0)
         return AVERROR_INVALIDDATA;
 
     order = floor(sqrt(output_channel_count - 1));
@@ -437,14 +526,16 @@ static int ambisonics_config(void *s, AVIOContext *pb,
                 return ret;
         }
 
-        layer->ch_layout.order = AV_CHANNEL_ORDER_CUSTOM;
-        layer->ch_layout.nb_channels = output_channel_count;
-        layer->ch_layout.u.map = av_calloc(output_channel_count, sizeof(*layer->ch_layout.u.map));
-        if (!layer->ch_layout.u.map)
-            return AVERROR(ENOMEM);
+        ret = av_channel_layout_custom_init(&layer->ch_layout, output_channel_count);
+        if (ret < 0)
+            return ret;
 
         for (int i = 0; i < output_channel_count; i++)
             layer->ch_layout.u.map[i].id = avio_r8(pb) + AV_CHAN_AMBISONIC_BASE;
+
+        ret = av_channel_layout_retype(&layer->ch_layout, AV_CHANNEL_ORDER_AMBISONIC, 0);
+        if (ret < 0 && ret != AVERROR(ENOSYS))
+            return ret;
     } else {
         int coupled_substream_count = avio_r8(pb);  // M
         int nb_demixing_matrix = substream_count + coupled_substream_count;
@@ -485,6 +576,7 @@ static int param_parse(void *s, IAMFContext *c, AVIOContext *pb,
     AVIAMFParamDefinition *param;
     unsigned int parameter_id, parameter_rate, mode;
     unsigned int duration = 0, constant_subblock_duration = 0, nb_subblocks = 0;
+    unsigned int total_duration = 0;
     size_t param_size;
 
     parameter_id = ffio_read_leb(pb);
@@ -505,8 +597,10 @@ static int param_parse(void *s, IAMFContext *c, AVIOContext *pb,
         constant_subblock_duration = ffio_read_leb(pb);
         if (constant_subblock_duration == 0)
             nb_subblocks = ffio_read_leb(pb);
-        else
+        else {
             nb_subblocks = duration / constant_subblock_duration;
+            total_duration = duration;
+        }
     }
 
     param = av_iamf_param_definition_alloc(type, nb_subblocks, &param_size);
@@ -517,8 +611,11 @@ static int param_parse(void *s, IAMFContext *c, AVIOContext *pb,
         void *subblock = av_iamf_param_definition_get_subblock(param, i);
         unsigned int subblock_duration = constant_subblock_duration;
 
-        if (constant_subblock_duration == 0)
+        if (constant_subblock_duration == 0) {
             subblock_duration = ffio_read_leb(pb);
+            total_duration += subblock_duration;
+        } else if (i == nb_subblocks - 1)
+            subblock_duration = duration - i * constant_subblock_duration;
 
         switch (type) {
         case AV_IAMF_PARAMETER_DEFINITION_MIX_GAIN: {
@@ -546,6 +643,12 @@ static int param_parse(void *s, IAMFContext *c, AVIOContext *pb,
         }
     }
 
+    if (!mode && !constant_subblock_duration && total_duration != duration) {
+        av_log(s, AV_LOG_ERROR, "Invalid subblock durations in parameter_id %u\n", parameter_id);
+        av_free(param);
+        return AVERROR_INVALIDDATA;
+    }
+
     param->parameter_id = parameter_id;
     param->parameter_rate = parameter_rate;
     param->duration = duration;
@@ -554,7 +657,7 @@ static int param_parse(void *s, IAMFContext *c, AVIOContext *pb,
 
     if (param_definition) {
         if (param_definition->param_size != param_size || memcmp(param_definition->param, param, param_size)) {
-            av_log(s, AV_LOG_ERROR, "Incosistent parameters for parameter_id %u\n", parameter_id);
+            av_log(s, AV_LOG_ERROR, "Inconsistent parameters for parameter_id %u\n", parameter_id);
             av_free(param);
             return AVERROR_INVALIDDATA;
         }
@@ -594,19 +697,16 @@ static int audio_element_obu(void *s, IAMFContext *c, AVIOContext *pb, int len)
     FFIOContext b;
     AVIOContext *pbc;
     uint8_t *buf;
-    unsigned audio_element_id, codec_config_id, num_parameters;
+    unsigned audio_element_id, nb_substreams, codec_config_id, num_parameters;
     int audio_element_type, ret;
 
     buf = av_malloc(len);
     if (!buf)
         return AVERROR(ENOMEM);
 
-    ret = avio_read(pb, buf, len);
-    if (ret != len) {
-        if (ret >= 0)
-            ret = AVERROR_INVALIDDATA;
+    ret = ffio_read_size(pb, buf, len);
+    if (ret < 0)
         goto fail;
-    }
 
     ffio_init_context(&b, buf, len, 0, NULL, NULL, NULL, NULL);
     pbc = &b.pub;
@@ -621,11 +721,17 @@ static int audio_element_obu(void *s, IAMFContext *c, AVIOContext *pb, int len)
         }
 
     audio_element_type = avio_r8(pbc) >> 5;
+    if (audio_element_type > AV_IAMF_AUDIO_ELEMENT_TYPE_SCENE) {
+        av_log(s, AV_LOG_DEBUG, "Unknown audio_element_type referenced in an audio element. Ignoring\n");
+        ret = 0;
+        goto fail;
+    }
+
     codec_config_id = ffio_read_leb(pbc);
 
     codec_config = ff_iamf_get_codec_config(c, codec_config_id);
     if (!codec_config) {
-        av_log(s, AV_LOG_ERROR, "Non existant codec config id %d referenced in an audio element\n", codec_config_id);
+        av_log(s, AV_LOG_ERROR, "Non existent codec config id %d referenced in an audio element\n", codec_config_id);
         ret = AVERROR_INVALIDDATA;
         goto fail;
     }
@@ -649,14 +755,15 @@ static int audio_element_obu(void *s, IAMFContext *c, AVIOContext *pb, int len)
         goto fail;
     }
 
-    audio_element->nb_substreams = ffio_read_leb(pbc);
+    nb_substreams = ffio_read_leb(pbc);
     audio_element->codec_config_id = codec_config_id;
     audio_element->audio_element_id = audio_element_id;
-    audio_element->substreams = av_calloc(audio_element->nb_substreams, sizeof(*audio_element->substreams));
+    audio_element->substreams = av_calloc(nb_substreams, sizeof(*audio_element->substreams));
     if (!audio_element->substreams) {
         ret = AVERROR(ENOMEM);
         goto fail;
     }
+    audio_element->nb_substreams = nb_substreams;
 
     element = audio_element->element = av_iamf_audio_element_alloc();
     if (!element) {
@@ -682,7 +789,7 @@ static int audio_element_obu(void *s, IAMFContext *c, AVIOContext *pb, int len)
         substream->codecpar->codec_id   = codec_config->codec_id;
         substream->codecpar->frame_size = codec_config->nb_samples;
         substream->codecpar->sample_rate = codec_config->sample_rate;
-        substream->codecpar->seek_preroll = codec_config->seek_preroll;
+        substream->codecpar->seek_preroll = -codec_config->audio_roll_distance * codec_config->nb_samples;
 
         switch(substream->codecpar->codec_id) {
         case AV_CODEC_ID_AAC:
@@ -701,6 +808,12 @@ static int audio_element_obu(void *s, IAMFContext *c, AVIOContext *pb, int len)
     }
 
     num_parameters = ffio_read_leb(pbc);
+    if (num_parameters > 2 && audio_element_type == 0) {
+        av_log(s, AV_LOG_ERROR, "Audio Element parameter count %u is invalid"
+                                " for Channel representations\n", num_parameters);
+        ret = AVERROR_INVALIDDATA;
+        goto fail;
+    }
     if (num_parameters && audio_element_type != 0) {
         av_log(s, AV_LOG_ERROR, "Audio Element parameter count %u is invalid"
                                 " for Scene representations\n", num_parameters);
@@ -714,11 +827,19 @@ static int audio_element_obu(void *s, IAMFContext *c, AVIOContext *pb, int len)
         type = ffio_read_leb(pbc);
         if (type == AV_IAMF_PARAMETER_DEFINITION_MIX_GAIN)
             ret = AVERROR_INVALIDDATA;
-        else if (type == AV_IAMF_PARAMETER_DEFINITION_DEMIXING)
+        else if (type == AV_IAMF_PARAMETER_DEFINITION_DEMIXING) {
+            if (element->demixing_info) {
+                ret = AVERROR_INVALIDDATA;
+                goto fail;
+            }
             ret = param_parse(s, c, pbc, type, audio_element, &element->demixing_info);
-        else if (type == AV_IAMF_PARAMETER_DEFINITION_RECON_GAIN)
+        } else if (type == AV_IAMF_PARAMETER_DEFINITION_RECON_GAIN) {
+            if (element->recon_gain_info) {
+                ret = AVERROR_INVALIDDATA;
+                goto fail;
+            }
             ret = param_parse(s, c, pbc, type, audio_element, &element->recon_gain_info);
-        else {
+        } else {
             unsigned param_definition_size = ffio_read_leb(pbc);
             avio_skip(pbc, param_definition_size);
         }
@@ -735,8 +856,7 @@ static int audio_element_obu(void *s, IAMFContext *c, AVIOContext *pb, int len)
         if (ret < 0)
             goto fail;
     } else {
-        unsigned audio_element_config_size = ffio_read_leb(pbc);
-        avio_skip(pbc, audio_element_config_size);
+        av_assert0(0);
     }
 
     c->audio_elements[c->nb_audio_elements++] = audio_element;
@@ -784,12 +904,9 @@ static int mix_presentation_obu(void *s, IAMFContext *c, AVIOContext *pb, int le
     if (!buf)
         return AVERROR(ENOMEM);
 
-    ret = avio_read(pb, buf, len);
-    if (ret != len) {
-        if (ret >= 0)
-            ret = AVERROR_INVALIDDATA;
+    ret = ffio_read_size(pb, buf, len);
+    if (ret < 0)
         goto fail;
-    }
 
     ffio_init_context(&b, buf, len, 0, NULL, NULL, NULL, NULL);
     pbc = &b.pub;
@@ -945,7 +1062,8 @@ static int mix_presentation_obu(void *s, IAMFContext *c, AVIOContext *pb, int le
                     goto fail;
                 }
                 av_channel_layout_copy(&submix_layout->sound_system, &ff_iamf_sound_system_map[sound_system].layout);
-            }
+            } else
+                submix_layout->sound_system = (AVChannelLayout)AV_CHANNEL_LAYOUT_BINAURAL;
 
             info_type = avio_r8(pbc);
             submix_layout->integrated_loudness = av_make_q(sign_extend(avio_rb16(pbc), 16), 1 << 8);
@@ -1060,6 +1178,7 @@ int ff_iamfdec_read_descriptors(IAMFContext *c, AVIOContext *pb,
         size = avio_read(pb, header, FFMIN(MAX_IAMF_OBU_HEADER_SIZE, max_size));
         if (size < 0)
             return size;
+        memset(header + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
 
         len = ff_iamf_parse_obu_header(header, size, &obu_size, &start_pos, &type, NULL, NULL);
         if (len < 0 || obu_size > max_size) {

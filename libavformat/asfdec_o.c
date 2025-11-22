@@ -867,6 +867,9 @@ static int asf_read_simple_index(AVFormatContext *s, const GUIDParseTable *g)
     int64_t offset;
     uint64_t size = avio_rl64(pb);
 
+    if (size < 24)
+        return AVERROR_INVALIDDATA;
+
     // simple index objects should be ordered by stream number, this loop tries to find
     // the first not indexed video stream
     for (i = 0; i < asf->nb_streams; i++) {
@@ -1243,7 +1246,7 @@ static int asf_read_packet_header(AVFormatContext *s)
     ASFContext *asf = s->priv_data;
     AVIOContext *pb = s->pb;
     uint64_t size;
-    uint32_t av_unused seq;
+    av_unused uint32_t seq;
     unsigned char error_flags, len_flags, pay_flags;
 
     asf->packet_offset = avio_tell(pb);
